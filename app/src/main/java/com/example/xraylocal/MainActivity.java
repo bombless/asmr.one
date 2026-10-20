@@ -6,6 +6,11 @@ import android.os.Bundle;
 import android.graphics.Color;
 import android.content.SharedPreferences;
 import android.net.Uri;
+import android.media.MediaPlayer;
+import android.media.AudioAttributes;
+import android.widget.SeekBar;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Base64;
 import android.util.Log;
 import android.widget.Toast;
@@ -94,6 +99,50 @@ public class MainActivity extends Activity {
     private volatile String asmrAuthorization = "";
     private volatile String asmrUsername = "";
 
+    // In-app media player fields
+    private MediaPlayer mediaPlayer;
+    private LocalMediaProxyServer mediaProxyServer;
+    private final Handler progressHandler = new Handler(Looper.getMainLooper());
+    private Runnable progressRunnable;
+    private String currentPlayingTitle = "";
+    private String currentPlayingUrl = "";
+    private boolean isPreparingMedia = false;
+    private LinearLayout playerBarView;
+    private TextView playerTitleView;
+    private TextView playerTimeView;
+    private Button playerPlayPauseBtn;
+    private SeekBar playerSeekBar;
+    private boolean isUserTrackingSeekBar = false;
+
+    public boolean isAsmrUseXray() {
+        return asmrUseXray;
+    }
+
+    public String getAsmrAuthorization() {
+        return asmrAuthorization;
+    }
+
+    public Socket openSocketForUrl(URL url, boolean useXray) throws Exception {
+        int port = url.getPort() > 0 ? url.getPort() : (url.getProtocol().equalsIgnoreCase("https") ? 443 : 80);
+        if (useXray) {
+            waitForXray();
+            if (controller == null) throw new java.io.IOException("Xray controller is null");
+            if (url.getProtocol().equalsIgnoreCase("https")) {
+                XraySSLSocketFactory sf = new XraySSLSocketFactory(controller);
+                return sf.createSocket(url.getHost(), port);
+            } else {
+                return new XraySocket(controller, url.getHost(), port);
+            }
+        } else {
+            if (url.getProtocol().equalsIgnoreCase("https")) {
+                SSLSocketFactory sf = (SSLSocketFactory) SSLSocketFactory.getDefault();
+                return sf.createSocket(url.getHost(), port);
+            } else {
+                return new Socket(url.getHost(), port);
+            }
+        }
+    }
+
     private final CoreCallbackHandler callback = new CoreCallbackHandler() {
         @Override public long startup() { coreStarted = true; return 0L; }
         @Override public long shutdown() { coreStarted = false; return 0L; }
@@ -138,6 +187,7 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
         responseParams.topMargin = dp(12);
         root.addView(responseScroll, responseParams);
+        root.addView(createPlayerBarView(), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         asmrUseXray = prefs.getBoolean("asmr_use_xray", true);
         String savedToken = prefs.getString("asmr_token", "");
@@ -305,6 +355,7 @@ public class MainActivity extends Activity {
         asmrContent = new LinearLayout(this); asmrContent.setOrientation(LinearLayout.VERTICAL);
         asmrScroll.addView(asmrContent);
         root.addView(asmrScroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        root.addView(createPlayerBarView(), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         setContentView(root);
         loadAsmrPage(asmrPage);
     }
@@ -340,6 +391,7 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
         responseParams.topMargin = dp(12);
         root.addView(responseScroll, responseParams);
+        root.addView(createPlayerBarView(), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         Button asmr = new Button(this);
         asmr.setText("打开 ASMR 浏览器");
@@ -1146,8 +1198,16 @@ public class MainActivity extends Activity {
 
                 String playUrl = !node.streamUrl.isEmpty() ? node.streamUrl : node.downloadUrl;
                 if (!playUrl.isEmpty()) {
+                    if (node.isAudio()) {
+                        Button playBtn = new Button(this);
+                        playBtn.setText("播放");
+                        playBtn.setTextSize(12);
+                        playBtn.setPadding(dp(8), dp(2), dp(8), dp(2));
+                        playBtn.setOnClickListener(v -> playAudioInApp(node.title, playUrl));
+                        itemRow.addView(playBtn);
+                    }
                     Button actionBtn = new Button(this);
-                    actionBtn.setText(node.isAudio() ? "播放/直链" : "查看直链");
+                    actionBtn.setText("更多");
                     actionBtn.setTextSize(12);
                     actionBtn.setPadding(dp(8), dp(2), dp(8), dp(2));
                     actionBtn.setOnClickListener(v -> showTrackActionDialog(node, playUrl));
@@ -1156,7 +1216,11 @@ public class MainActivity extends Activity {
 
                 itemRow.setOnClickListener(v -> {
                     if (!playUrl.isEmpty()) {
-                        showTrackActionDialog(node, playUrl);
+                        if (node.isAudio()) {
+                            playAudioInApp(node.title, playUrl);
+                        } else {
+                            showTrackActionDialog(node, playUrl);
+                        }
                     }
                 });
 
@@ -1168,7 +1232,7 @@ public class MainActivity extends Activity {
     private void showTrackActionDialog(AsmrTrackNode node, String url) {
         String[] actions;
         if (node.isAudio()) {
-            actions = new String[]{"外部应用播放 (调用播放器)", "复制播放流直链", "复制下载直链 (如有)", "查看完整地址"};
+            actions = new String[]{"应用内播放", "外部应用播放 (调用播放器)", "复制播放流直链", "复制下载直链 (如有)", "查看完整地址"};
         } else {
             actions = new String[]{"外部应用打开", "复制文件直链", "查看完整地址"};
         }
@@ -1179,6 +1243,8 @@ public class MainActivity extends Activity {
                     android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
                     if (node.isAudio()) {
                         if (which == 0) {
+                            playAudioInApp(node.title, url);
+                        } else if (which == 1) {
                             try {
                                 android.content.Intent intent = new android.content.Intent(android.content.Intent.ACTION_VIEW);
                                 intent.setDataAndType(Uri.parse(url), "audio/*");
@@ -1187,18 +1253,18 @@ public class MainActivity extends Activity {
                             } catch (Throwable e) {
                                 Toast.makeText(this, "启动播放器失败：" + e.getMessage(), Toast.LENGTH_SHORT).show();
                             }
-                        } else if (which == 1) {
+                        } else if (which == 2) {
                             if (cm != null) {
                                 cm.setPrimaryClip(android.content.ClipData.newPlainText("audio_stream", url));
                                 Toast.makeText(this, "播放流地址已复制到剪贴板", Toast.LENGTH_SHORT).show();
                             }
-                        } else if (which == 2) {
+                        } else if (which == 3) {
                             String dUrl = !node.downloadUrl.isEmpty() ? node.downloadUrl : url;
                             if (cm != null) {
                                 cm.setPrimaryClip(android.content.ClipData.newPlainText("audio_download", dUrl));
                                 Toast.makeText(this, "下载直链已复制到剪贴板", Toast.LENGTH_SHORT).show();
                             }
-                        } else if (which == 3) {
+                        } else if (which == 4) {
                             new AlertDialog.Builder(this)
                                     .setTitle("文件地址")
                                     .setMessage("流地址:\n" + url + "\n\n下载地址:\n" + (node.downloadUrl.isEmpty() ? "(同上)" : node.downloadUrl))
@@ -1868,7 +1934,340 @@ public class MainActivity extends Activity {
     private void pollForConfig(String base,String token){for(int i=0;i<300&&token.equals(transferToken);i++){try{Thread.sleep(1000);HttpResult r=requestDirect("GET",base+"/api/config-transfer/config?t="+Uri.encode(token),null);if(r.code==200){JSONObject config=decryptTransfer(r.json);writeSecureConfig(normalizeConfig(config));runOnUiThread(()->{if(pairingDialog!=null){pairingDialog.dismiss();pairingDialog=null;}transferToken=null;transferPrivateKey=null;Toast.makeText(this,"配置导入成功",Toast.LENGTH_SHORT).show();});return;}if(r.code==410||r.code==404){showError("迁移会话已过期，请重新扫码");return;}}catch(Exception e){showError("配置导入失败："+e.getMessage());return;}}}
     private JSONObject decryptTransfer(JSONObject encrypted)throws Exception{byte[] encryptedKey=Base64.decode(encrypted.getString("encryptedKey"),Base64.DEFAULT);OAEPParameterSpec oaep=new OAEPParameterSpec("SHA-256","MGF1",MGF1ParameterSpec.SHA256,PSource.PSpecified.DEFAULT);Cipher rsa=Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding");rsa.init(Cipher.DECRYPT_MODE,transferPrivateKey,oaep);byte[] aesKey=rsa.doFinal(encryptedKey);Cipher aes=Cipher.getInstance("AES/GCM/NoPadding");byte[] iv=Base64.decode(encrypted.getString("iv"),Base64.DEFAULT);byte[] tag=Base64.decode(encrypted.getString("tag"),Base64.DEFAULT);byte[] ciphertext=Base64.decode(encrypted.getString("ciphertext"),Base64.DEFAULT);byte[] combined=new byte[ciphertext.length+tag.length];System.arraycopy(ciphertext,0,combined,0,ciphertext.length);System.arraycopy(tag,0,combined,ciphertext.length,tag.length);aes.init(Cipher.DECRYPT_MODE,new javax.crypto.spec.SecretKeySpec(aesKey,"AES"),new GCMParameterSpec(128,iv));return new JSONObject(new String(aes.doFinal(combined),StandardCharsets.UTF_8));}
     private void showError(String message){runOnUiThread(()->Toast.makeText(this,message,Toast.LENGTH_LONG).show());}
-    @Override protected void onDestroy(){io.shutdownNow();transferPrivateKey=null;transferToken=null;if(pairingDialog!=null)pairingDialog.dismiss();if(controller!=null){try{controller.stopLoop();}catch(Throwable ignored){}}controller=null;coreStarted=false;super.onDestroy();}
+    @Override protected void onDestroy(){
+        stopAudioPlayback();
+        if (mediaProxyServer != null) {
+            mediaProxyServer.stop();
+            mediaProxyServer = null;
+        }
+        io.shutdownNow();
+        transferPrivateKey=null;
+        transferToken=null;
+        if(pairingDialog!=null)pairingDialog.dismiss();
+        if(controller!=null){try{controller.stopLoop();}catch(Throwable ignored){}}
+        controller=null;
+        coreStarted=false;
+        super.onDestroy();
+    }
+
+    private LinearLayout createPlayerBarView() {
+        if (playerBarView != null && playerBarView.getParent() != null) {
+            ((ViewGroup) playerBarView.getParent()).removeView(playerBarView);
+        }
+        playerBarView = new LinearLayout(this);
+        playerBarView.setOrientation(LinearLayout.VERTICAL);
+        playerBarView.setBackgroundColor(Color.rgb(238, 242, 246));
+        playerBarView.setPadding(dp(12), dp(8), dp(12), dp(10));
+        playerBarView.setVisibility(currentPlayingUrl.isEmpty() ? View.GONE : View.VISIBLE);
+
+        // Top row: Title + Close Button
+        LinearLayout topRow = new LinearLayout(this);
+        topRow.setOrientation(LinearLayout.HORIZONTAL);
+        topRow.setGravity(Gravity.CENTER_VERTICAL);
+
+        playerTitleView = new TextView(this);
+        playerTitleView.setText(currentPlayingTitle.isEmpty() ? "未在播放" : currentPlayingTitle);
+        playerTitleView.setTextSize(13);
+        playerTitleView.setTextColor(Color.rgb(20, 30, 45));
+        playerTitleView.setSingleLine(true);
+        playerTitleView.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        topRow.addView(playerTitleView, titleParams);
+
+        Button closeBtn = new Button(this);
+        closeBtn.setText("✕");
+        closeBtn.setTextSize(12);
+        closeBtn.setPadding(dp(6), dp(0), dp(6), dp(0));
+        closeBtn.setOnClickListener(v -> stopAudioPlayback());
+        topRow.addView(closeBtn);
+
+        playerBarView.addView(topRow);
+
+        // Middle row: SeekBar + Time label
+        LinearLayout progressRow = new LinearLayout(this);
+        progressRow.setOrientation(LinearLayout.HORIZONTAL);
+        progressRow.setGravity(Gravity.CENTER_VERTICAL);
+
+        playerSeekBar = new SeekBar(this);
+        playerSeekBar.setMax(1000);
+        playerSeekBar.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        playerSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                if (fromUser && mediaPlayer != null) {
+                    try {
+                        int duration = mediaPlayer.getDuration();
+                        if (duration > 0) {
+                            int newPos = (int) ((progress / 1000.0) * duration);
+                            playerTimeView.setText(formatDuration(newPos / 1000.0) + " / " + formatDuration(duration / 1000.0));
+                        }
+                    } catch (Exception ignored) {}
+                }
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {
+                isUserTrackingSeekBar = true;
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                isUserTrackingSeekBar = false;
+                if (mediaPlayer != null) {
+                    try {
+                        int duration = mediaPlayer.getDuration();
+                        if (duration > 0) {
+                            int targetPos = (int) ((seekBar.getProgress() / 1000.0) * duration);
+                            mediaPlayer.seekTo(targetPos);
+                        }
+                    } catch (Exception ignored) {}
+                }
+            }
+        });
+        progressRow.addView(playerSeekBar);
+
+        playerTimeView = new TextView(this);
+        playerTimeView.setText("00:00 / 00:00");
+        playerTimeView.setTextSize(11);
+        playerTimeView.setTextColor(Color.DKGRAY);
+        playerTimeView.setPadding(dp(6), 0, dp(4), 0);
+        progressRow.addView(playerTimeView);
+
+        playerBarView.addView(progressRow);
+
+        // Bottom row: Controls (Rewind 15s, Play/Pause, Forward 15s)
+        LinearLayout controlsRow = new LinearLayout(this);
+        controlsRow.setOrientation(LinearLayout.HORIZONTAL);
+        controlsRow.setGravity(Gravity.CENTER);
+
+        Button rewBtn = new Button(this);
+        rewBtn.setText("-15s");
+        rewBtn.setTextSize(12);
+        rewBtn.setPadding(dp(12), dp(2), dp(12), dp(2));
+        rewBtn.setOnClickListener(v -> {
+            if (mediaPlayer != null) {
+                try {
+                    int pos = Math.max(0, mediaPlayer.getCurrentPosition() - 15000);
+                    mediaPlayer.seekTo(pos);
+                    updatePlayerProgress();
+                } catch (Exception ignored) {}
+            }
+        });
+        controlsRow.addView(rewBtn);
+
+        playerPlayPauseBtn = new Button(this);
+        playerPlayPauseBtn.setText((mediaPlayer != null && mediaPlayer.isPlaying()) ? "暂停" : "播放");
+        playerPlayPauseBtn.setTextSize(12);
+        playerPlayPauseBtn.setPadding(dp(16), dp(2), dp(16), dp(2));
+        playerPlayPauseBtn.setOnClickListener(v -> toggleAudioPlayback());
+        controlsRow.addView(playerPlayPauseBtn);
+
+        Button fwdBtn = new Button(this);
+        fwdBtn.setText("+15s");
+        fwdBtn.setTextSize(12);
+        fwdBtn.setPadding(dp(12), dp(2), dp(12), dp(2));
+        fwdBtn.setOnClickListener(v -> {
+            if (mediaPlayer != null) {
+                try {
+                    int duration = mediaPlayer.getDuration();
+                    int pos = Math.min(duration > 0 ? duration : Integer.MAX_VALUE, mediaPlayer.getCurrentPosition() + 15000);
+                    mediaPlayer.seekTo(pos);
+                    updatePlayerProgress();
+                } catch (Exception ignored) {}
+            }
+        });
+        controlsRow.addView(fwdBtn);
+
+        playerBarView.addView(controlsRow);
+        return playerBarView;
+    }
+
+    private void playAudioInApp(String title, String url) {
+        if (title == null) title = "音频播放";
+        currentPlayingTitle = title;
+        currentPlayingUrl = url;
+
+        if (playerBarView != null) {
+            playerBarView.setVisibility(View.VISIBLE);
+        }
+        if (playerTitleView != null) {
+            playerTitleView.setText("加载中: " + title);
+        }
+        if (playerPlayPauseBtn != null) {
+            playerPlayPauseBtn.setText("加载中");
+            playerPlayPauseBtn.setEnabled(false);
+        }
+        if (playerTimeView != null) {
+            playerTimeView.setText("00:00 / 00:00");
+        }
+        if (playerSeekBar != null) {
+            playerSeekBar.setProgress(0);
+        }
+
+        io.execute(() -> {
+            try {
+                if (mediaProxyServer == null) {
+                    mediaProxyServer = new LocalMediaProxyServer(this);
+                    mediaProxyServer.start();
+                }
+                String playbackUrl = mediaProxyServer.getProxyUrl(url);
+
+                runOnUiThread(() -> {
+                    try {
+                        if (mediaPlayer != null) {
+                            try {
+                                if (mediaPlayer.isPlaying()) mediaPlayer.stop();
+                            } catch (Exception ignored) {}
+                            mediaPlayer.reset();
+                            mediaPlayer.release();
+                            mediaPlayer = null;
+                        }
+
+                        mediaPlayer = new MediaPlayer();
+                        mediaPlayer.setAudioAttributes(
+                                new AudioAttributes.Builder()
+                                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                                        .build()
+                        );
+                        mediaPlayer.setDataSource(this, Uri.parse(playbackUrl));
+
+                        isPreparingMedia = true;
+                        mediaPlayer.setOnPreparedListener(mp -> {
+                            isPreparingMedia = false;
+                            mp.start();
+                            if (playerPlayPauseBtn != null) {
+                                playerPlayPauseBtn.setText("暂停");
+                                playerPlayPauseBtn.setEnabled(true);
+                            }
+                            if (playerTitleView != null) {
+                                playerTitleView.setText("▶ " + currentPlayingTitle);
+                            }
+                            startProgressUpdater();
+                            Toast.makeText(this, "正在播放: " + currentPlayingTitle, Toast.LENGTH_SHORT).show();
+                        });
+
+                        mediaPlayer.setOnCompletionListener(mp -> {
+                            if (playerPlayPauseBtn != null) {
+                                playerPlayPauseBtn.setText("播放");
+                            }
+                            if (playerTitleView != null) {
+                                playerTitleView.setText("已播完: " + currentPlayingTitle);
+                            }
+                            stopProgressUpdater();
+                        });
+
+                        mediaPlayer.setOnErrorListener((mp, what, extra) -> {
+                            isPreparingMedia = false;
+                            Log.e(TAG, "MediaPlayer error what=" + what + " extra=" + extra);
+                            Toast.makeText(this, "音频播放出错 (" + what + ", " + extra + ")", Toast.LENGTH_LONG).show();
+                            if (playerPlayPauseBtn != null) {
+                                playerPlayPauseBtn.setText("重试");
+                                playerPlayPauseBtn.setEnabled(true);
+                            }
+                            if (playerTitleView != null) {
+                                playerTitleView.setText("播放出错: " + currentPlayingTitle);
+                            }
+                            stopProgressUpdater();
+                            return true;
+                        });
+
+                        mediaPlayer.prepareAsync();
+                    } catch (Throwable e) {
+                        Log.e(TAG, "Failed to start media player", e);
+                        Toast.makeText(this, "无法初始化播放器: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                        if (playerPlayPauseBtn != null) {
+                            playerPlayPauseBtn.setText("重试");
+                            playerPlayPauseBtn.setEnabled(true);
+                        }
+                    }
+                });
+            } catch (Throwable e) {
+                Log.e(TAG, "Proxy setup failed", e);
+                runOnUiThread(() -> Toast.makeText(this, "本地媒体代理启动失败: " + e.getMessage(), Toast.LENGTH_LONG).show());
+            }
+        });
+    }
+
+    private void toggleAudioPlayback() {
+        if (mediaPlayer == null) {
+            if (!currentPlayingUrl.isEmpty()) {
+                playAudioInApp(currentPlayingTitle, currentPlayingUrl);
+            }
+            return;
+        }
+        if (isPreparingMedia) return;
+        try {
+            if (mediaPlayer.isPlaying()) {
+                mediaPlayer.pause();
+                if (playerPlayPauseBtn != null) playerPlayPauseBtn.setText("播放");
+                if (playerTitleView != null) playerTitleView.setText("❚❚ " + currentPlayingTitle);
+            } else {
+                mediaPlayer.start();
+                if (playerPlayPauseBtn != null) playerPlayPauseBtn.setText("暂停");
+                if (playerTitleView != null) playerTitleView.setText("▶ " + currentPlayingTitle);
+                startProgressUpdater();
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "toggleAudioPlayback failed", e);
+        }
+    }
+
+    private void stopAudioPlayback() {
+        stopProgressUpdater();
+        if (mediaPlayer != null) {
+            try {
+                if (mediaPlayer.isPlaying()) mediaPlayer.stop();
+            } catch (Exception ignored) {}
+            try {
+                mediaPlayer.reset();
+                mediaPlayer.release();
+            } catch (Exception ignored) {}
+            mediaPlayer = null;
+        }
+        isPreparingMedia = false;
+        currentPlayingUrl = "";
+        currentPlayingTitle = "";
+        if (playerBarView != null) {
+            playerBarView.setVisibility(View.GONE);
+        }
+    }
+
+    private void startProgressUpdater() {
+        stopProgressUpdater();
+        progressRunnable = new Runnable() {
+            @Override
+            public void run() {
+                updatePlayerProgress();
+                if (mediaPlayer != null && mediaPlayer.isPlaying()) {
+                    progressHandler.postDelayed(this, 500);
+                }
+            }
+        };
+        progressHandler.post(progressRunnable);
+    }
+
+    private void stopProgressUpdater() {
+        if (progressRunnable != null) {
+            progressHandler.removeCallbacks(progressRunnable);
+            progressRunnable = null;
+        }
+    }
+
+    private void updatePlayerProgress() {
+        if (mediaPlayer == null || isPreparingMedia) return;
+        try {
+            int current = mediaPlayer.getCurrentPosition();
+            int duration = mediaPlayer.getDuration();
+            if (duration > 0 && !isUserTrackingSeekBar && playerSeekBar != null) {
+                int progress = (int) (((long) current * 1000) / duration);
+                playerSeekBar.setProgress(progress);
+            }
+            if (playerTimeView != null) {
+                playerTimeView.setText(formatDuration(current / 1000.0) + " / " + formatDuration(duration > 0 ? duration / 1000.0 : 0));
+            }
+        } catch (Exception ignored) {}
+    }
 }
 
 
