@@ -169,6 +169,34 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static final class AsmrTrackNode {
+        String type;
+        String title;
+        String streamUrl;
+        String downloadUrl;
+        double duration;
+        long size;
+        java.util.ArrayList<AsmrTrackNode> children = new java.util.ArrayList<>();
+        boolean expanded = false;
+
+        AsmrTrackNode(String type, String title, String streamUrl, String downloadUrl, double duration, long size) {
+            this.type = type != null ? type : "";
+            this.title = title != null ? title : "";
+            this.streamUrl = streamUrl != null ? streamUrl : "";
+            this.downloadUrl = downloadUrl != null ? downloadUrl : "";
+            this.duration = duration;
+            this.size = size;
+        }
+
+        boolean isFolder() {
+            return "folder".equalsIgnoreCase(type);
+        }
+
+        boolean isAudio() {
+            return "audio".equalsIgnoreCase(type);
+        }
+    }
+
     @Override
     public void setContentView(View view) {
         super.setContentView(view);
@@ -647,6 +675,55 @@ public class MainActivity extends Activity {
         } finally { if (c != null) c.disconnect(); }
     }
 
+    private JSONArray fetchAsmrJsonArray(String urlText) throws Exception {
+        long started = android.os.SystemClock.elapsedRealtime();
+        HttpsURLConnection c = null;
+        try {
+            String requestHost = new URL(urlText).getHost();
+            asmrLog("I", "API tracks request begin host=" + requestHost + " route=" + (asmrUseXray ? "Xray" : "direct") + " coreStarted=" + coreStarted + " controllerNull=" + (controller == null), null);
+            logDnsResolutionAsync(requestHost, asmrUseXray ? "Xray" : "direct");
+            c = openHttpsConnection(urlText, asmrUseXray);
+            c.setConnectTimeout(TIMEOUT_MS);
+            c.setReadTimeout(30000);
+            c.setInstanceFollowRedirects(true);
+            c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/130 Mobile Safari/537.36");
+            c.setRequestProperty("Accept", "application/json, text/plain, */*");
+            c.setRequestProperty("Origin", "https://asmr.one");
+            c.setRequestProperty("Referer", "https://asmr.one/");
+            if (!asmrAuthorization.isEmpty()) c.setRequestProperty("Authorization", asmrAuthorization);
+            int code = c.getResponseCode();
+            InputStream in = code >= 400 ? c.getErrorStream() : c.getInputStream();
+            StringBuilder body = new StringBuilder();
+            if (in != null) {
+                try (BufferedReader br = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
+                    char[] buf = new char[8192];
+                    int n, total = 0;
+                    while ((n = br.read(buf)) != -1 && total < 10 * 1024 * 1024) {
+                        int keep = Math.min(n, 10 * 1024 * 1024 - total);
+                        body.append(buf, 0, keep);
+                        total += keep;
+                    }
+                }
+            }
+            asmrLog("I", "API tracks response status=" + code + " type=" + c.getContentType() + " chars=" + body.length() + " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - started), null);
+            if (code < 200 || code >= 300) {
+                if (code == 401 && !asmrAuthorization.isEmpty()) {
+                    asmrAuthorization = "";
+                    asmrUsername = "";
+                    prefs.edit().remove("asmr_token").remove("asmr_username").apply();
+                }
+                throw new java.io.IOException("API HTTP " + code + " body=" + body.substring(0, Math.min(300, body.length())));
+            }
+            return new JSONArray(body.toString());
+        } catch (Throwable e) {
+            asmrLog("E", "tracks API request failed", e);
+            if (e instanceof Exception) throw (Exception) e;
+            throw new java.io.IOException(e);
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
     private JSONObject fetchAsmrJson(String urlText) throws Exception {
         long started=android.os.SystemClock.elapsedRealtime(); HttpsURLConnection c=null;
         try {
@@ -825,32 +902,349 @@ public class MainActivity extends Activity {
         });
     }
 
+    private static String extractNumericId(String id) {
+        if (id == null) return "";
+        return id.replaceAll("[^0-9]", "");
+    }
+
+    private static String formatDuration(double sec) {
+        if (sec <= 0) return "";
+        long s = Math.round(sec);
+        long m = s / 60;
+        long remS = s % 60;
+        if (m < 60) {
+            return String.format(Locale.US, "%02d:%02d", m, remS);
+        }
+        long h = m / 60;
+        long remM = m % 60;
+        return String.format(Locale.US, "%d:%02d:%02d", h, remM, remS);
+    }
+
+    private static String formatFileSize(long bytes) {
+        if (bytes <= 0) return "";
+        if (bytes < 1024) return bytes + " B";
+        if (bytes < 1024 * 1024) return String.format(Locale.US, "%.1f KB", bytes / 1024.0);
+        if (bytes < 1024L * 1024 * 1024) return String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0));
+        return String.format(Locale.US, "%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0));
+    }
+
+    private java.util.ArrayList<AsmrTrackNode> parseAsmrTracksJson(JSONArray array) {
+        java.util.ArrayList<AsmrTrackNode> list = new java.util.ArrayList<>();
+        if (array == null) return list;
+        for (int i = 0; i < array.length(); i++) {
+            JSONObject obj = array.optJSONObject(i);
+            if (obj == null) continue;
+            String type = obj.optString("type", "");
+            String title = obj.optString("title", "");
+            String stream = obj.optString("mediaStreamUrl", "");
+            String download = obj.optString("mediaDownloadUrl", "");
+            double duration = obj.optDouble("duration", 0);
+            long size = obj.optLong("size", 0);
+            AsmrTrackNode node = new AsmrTrackNode(type, title, stream, download, duration, size);
+            JSONArray childrenArr = obj.optJSONArray("children");
+            if (childrenArr != null && childrenArr.length() > 0) {
+                node.children = parseAsmrTracksJson(childrenArr);
+            }
+            list.add(node);
+        }
+        return list;
+    }
+
+    private void countTracks(java.util.List<AsmrTrackNode> nodes, int[] counts) {
+        if (nodes == null) return;
+        for (AsmrTrackNode node : nodes) {
+            if (node.isFolder()) {
+                counts[0]++;
+                countTracks(node.children, counts);
+            } else {
+                counts[1]++;
+                if (node.isAudio()) counts[2]++;
+            }
+        }
+    }
+
     private void loadAsmrDetail(AsmrWork work) {
-        asmrContent.removeAllViews();TextView loading=new TextView(this);loading.setText("正在请求作品 HTML 并解析目录…");asmrContent.addView(loading);
+        asmrContent.removeAllViews();
+        TextView loading = new TextView(this);
+        loading.setText("正在通过 ASMR API 请求作品目录…\n代理：" + (asmrUseXray ? "Xray" : "直连"));
+        loading.setPadding(0, dp(20), 0, dp(20));
+        asmrContent.addView(loading);
         io.execute(() -> {
             try {
-                asmrLog("I", "详情请求开始 id=" + work.id + " url=" + work.url, null);
-                String html=fetchAsmrHtml(work.url);
-                asmrLog("I", "详情 HTML chars=" + html.length() + " audioExtMarkers=" + (html.toLowerCase(java.util.Locale.ROOT).split("\\\\.(mp3|wav|m4a|ogg)",-1).length-1), null);
-                java.util.ArrayList<String[]> entries=parseAsmrDirectory(html);
-                asmrLog("I", "详情解析完成 id=" + work.id + " entries=" + entries.size(), null);
+                String numericId = extractNumericId(work.id);
+                if (numericId.isEmpty()) {
+                    throw new IllegalArgumentException("无法从作品 ID 提取数字：" + work.id);
+                }
+                asmrLog("I", "作品目录请求开始 workId=" + work.id + " numericId=" + numericId, null);
+                String tracksUrl = "https://api.asmr-200.com/api/tracks/" + numericId + "?v=2";
+                JSONArray arr = fetchAsmrJsonArray(tracksUrl);
+                java.util.ArrayList<AsmrTrackNode> nodes = parseAsmrTracksJson(arr);
+                int[] stats = new int[3]; // [folders, totalFiles, audioFiles]
+                countTracks(nodes, stats);
+                asmrLog("I", "作品目录加载成功 workId=" + work.id + " folders=" + stats[0] + " files=" + stats[1] + " audio=" + stats[2], null);
                 runOnUiThread(() -> {
-                    asmrContent.removeAllViews();Button back=new Button(this);back.setText("← 返回作品列表");back.setOnClickListener(v->loadAsmrPage(asmrPage));asmrContent.addView(back);
-                    TextView title=new TextView(this);title.setText(work.title);title.setTextSize(20);title.setPadding(0,dp(8),0,dp(8));asmrContent.addView(title);
-                    TextView note=new TextView(this);note.setText("从作品详情 HTML 提取到 "+entries.size()+" 个目录/媒体链接");asmrContent.addView(note);
-                    if(entries.isEmpty()){TextView msg=new TextView(this);msg.setText("详情 HTML 未包含可直接读取的音频目录。该页面可能由前端脚本再请求目录数据；此版本不会嵌入 WebView，也不会改用 API 替代 HTML。");asmrContent.addView(msg);}
-                    for(String[] e:entries){TextView item=new TextView(this);item.setText((e[2].equals("audio")?"♫ ":"📁 ")+e[0]+"\n"+e[1]);item.setPadding(dp(12),dp(12),dp(12),dp(12));asmrContent.addView(item);if(e[2].equals("audio")){Button play=new Button(this);play.setText("打开音频链接");play.setOnClickListener(v->new AlertDialog.Builder(this).setTitle("音频地址").setMessage(e[1]).setPositiveButton("复制",(d,w)->{android.content.ClipboardManager cm=(android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE);cm.setPrimaryClip(android.content.ClipData.newPlainText("audio",e[1]));}).setNegativeButton("关闭",null).show());asmrContent.addView(play);}}
+                    if (isFinishing() || asmrContent == null) return;
+                    renderAsmrDetail(work, nodes, stats);
                 });
-            } catch(Throwable e){runOnUiThread(()->{asmrContent.removeAllViews();TextView err=new TextView(this);err.setText("详情 HTML 加载失败："+e.getMessage());asmrContent.addView(err);});}
+            } catch (Throwable e) {
+                asmrLog("E", "作品目录请求失败 workId=" + work.id, e);
+                runOnUiThread(() -> {
+                    if (isFinishing() || asmrContent == null) return;
+                    asmrContent.removeAllViews();
+                    Button back = new Button(this);
+                    back.setText("← 返回作品列表");
+                    back.setOnClickListener(v -> loadAsmrPage(asmrPage));
+                    asmrContent.addView(back);
+
+                    TextView err = new TextView(this);
+                    err.setText("目录加载失败：\n" + e.getClass().getSimpleName() + ": " + e.getMessage() + "\n\n可检查代理设置或在诊断日志中查看详细错误。");
+                    err.setTextColor(Color.RED);
+                    err.setPadding(0, dp(12), 0, dp(12));
+                    asmrContent.addView(err);
+
+                    Button retry = new Button(this);
+                    retry.setText("重试");
+                    retry.setOnClickListener(v -> loadAsmrDetail(work));
+                    asmrContent.addView(retry);
+                });
+            }
         });
     }
 
-    private java.util.ArrayList<String[]> parseAsmrDirectory(String html) {
-        java.util.ArrayList<String[]> out=new java.util.ArrayList<>();
-        java.util.regex.Matcher m=java.util.regex.Pattern.compile("(?is)(?:\\\"(?:title|name|fileName)\\\"\\s*:\\s*\\\"([^\\\"]+)\\\".{0,500}?\\\"(?:mediaStreamUrl|mediaDownloadUrl|url|src)\\\"\\s*:\\s*\\\"([^\\\"]+\\.(?:mp3|wav|m4a|ogg)(?:\\?[^\\\"]*)?)\\\")|(?:href=\\\"([^\\\"]+\\.(?:mp3|wav|m4a|ogg)(?:\\?[^\\\"]*)?)\\\"[^>]*>(.*?)</a>)",java.util.regex.Pattern.CASE_INSENSITIVE).matcher(html);
-        while(m.find()){String name=m.group(1),url=m.group(2);if(url==null){url=m.group(3);name=m.group(4);}if(url!=null){url=url.replace("&amp;","&").replace("\\\\/","/");if(!url.startsWith("http"))url="https://asmr.one"+(url.startsWith("/")?"":"/")+url;out.add(new String[]{htmlDecode(name==null?"音频文件":name),url,"audio"});}}
-        return out;
+    private void renderAsmrDetail(AsmrWork work, java.util.ArrayList<AsmrTrackNode> nodes, int[] stats) {
+        asmrContent.removeAllViews();
+        Button back = new Button(this);
+        back.setText("← 返回作品列表");
+        back.setOnClickListener(v -> loadAsmrPage(asmrPage));
+        asmrContent.addView(back);
+
+        TextView title = new TextView(this);
+        title.setText(work.title);
+        title.setTextSize(18);
+        title.setTextColor(Color.rgb(20, 25, 35));
+        title.setPadding(0, dp(8), 0, dp(4));
+        asmrContent.addView(title);
+
+        TextView meta = new TextView(this);
+        meta.setText(work.id + (work.circle.isEmpty() ? "" : "  |  " + work.circle) + (work.date.isEmpty() ? "" : "  |  " + work.date));
+        meta.setTextSize(13);
+        meta.setTextColor(Color.DKGRAY);
+        meta.setPadding(0, 0, 0, dp(8));
+        asmrContent.addView(meta);
+
+        TextView summary = new TextView(this);
+        summary.setText("目录结构：共 " + stats[0] + " 个文件夹，" + stats[1] + " 个文件（包含 " + stats[2] + " 个音频）\n点击文件夹可展开/折叠，点击音频可播放/复制直链");
+        summary.setTextSize(12);
+        summary.setTextColor(Color.rgb(80, 90, 100));
+        summary.setPadding(dp(8), dp(6), dp(8), dp(8));
+        summary.setBackgroundColor(Color.rgb(240, 243, 248));
+        asmrContent.addView(summary);
+
+        if (nodes.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText("该作品目录为空。");
+            empty.setPadding(0, dp(16), 0, dp(16));
+            asmrContent.addView(empty);
+            return;
+        }
+
+        LinearLayout treeContainer = new LinearLayout(this);
+        treeContainer.setOrientation(LinearLayout.VERTICAL);
+        treeContainer.setPadding(0, dp(8), 0, dp(24));
+        renderTrackNodes(treeContainer, nodes, 0);
+        asmrContent.addView(treeContainer);
     }
+
+    private void renderTrackNodes(LinearLayout container, java.util.List<AsmrTrackNode> nodes, int depth) {
+        if (nodes == null) return;
+        for (AsmrTrackNode node : nodes) {
+            if (node.isFolder()) {
+                LinearLayout folderRow = new LinearLayout(this);
+                folderRow.setOrientation(LinearLayout.VERTICAL);
+                LinearLayout.LayoutParams frParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                frParams.topMargin = dp(3);
+                frParams.bottomMargin = dp(3);
+                folderRow.setLayoutParams(frParams);
+
+                LinearLayout header = new LinearLayout(this);
+                header.setOrientation(LinearLayout.HORIZONTAL);
+                header.setGravity(Gravity.CENTER_VERTICAL);
+                header.setPadding(dp(8 + depth * 14), dp(8), dp(8), dp(8));
+                header.setBackgroundColor(Color.rgb(235, 240, 248));
+
+                TextView arrow = new TextView(this);
+                arrow.setText(node.expanded ? "▼ " : "▶ ");
+                arrow.setTextSize(13);
+                arrow.setTextColor(Color.rgb(30, 90, 160));
+                header.addView(arrow);
+
+                TextView fTitle = new TextView(this);
+                int childCount = node.children != null ? node.children.size() : 0;
+                fTitle.setText("📁 " + node.title + " (" + childCount + ")");
+                fTitle.setTextSize(14);
+                fTitle.setTextColor(Color.rgb(20, 30, 50));
+                fTitle.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+                header.addView(fTitle);
+
+                LinearLayout childrenContainer = new LinearLayout(this);
+                childrenContainer.setOrientation(LinearLayout.VERTICAL);
+                childrenContainer.setVisibility(node.expanded ? View.VISIBLE : View.GONE);
+
+                header.setOnClickListener(v -> {
+                    node.expanded = !node.expanded;
+                    arrow.setText(node.expanded ? "▼ " : "▶ ");
+                    if (node.expanded && childrenContainer.getChildCount() == 0) {
+                        renderTrackNodes(childrenContainer, node.children, depth + 1);
+                    }
+                    childrenContainer.setVisibility(node.expanded ? View.VISIBLE : View.GONE);
+                });
+
+                folderRow.addView(header);
+                folderRow.addView(childrenContainer);
+
+                if (node.expanded) {
+                    renderTrackNodes(childrenContainer, node.children, depth + 1);
+                }
+
+                container.addView(folderRow);
+            } else {
+                LinearLayout itemRow = new LinearLayout(this);
+                itemRow.setOrientation(LinearLayout.HORIZONTAL);
+                itemRow.setGravity(Gravity.CENTER_VERTICAL);
+                itemRow.setPadding(dp(8 + depth * 14), dp(6), dp(8), dp(6));
+
+                String icon = "📄 ";
+                if (node.isAudio()) icon = "🎵 ";
+                else if ("image".equalsIgnoreCase(node.type)) icon = "🖼️ ";
+                else if ("text".equalsIgnoreCase(node.type)) icon = "📝 ";
+
+                LinearLayout infoBox = new LinearLayout(this);
+                infoBox.setOrientation(LinearLayout.VERTICAL);
+                infoBox.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+                TextView itemTitle = new TextView(this);
+                itemTitle.setText(icon + node.title);
+                itemTitle.setTextSize(13);
+                itemTitle.setTextColor(node.isAudio() ? Color.rgb(10, 60, 120) : Color.rgb(40, 45, 55));
+                infoBox.addView(itemTitle);
+
+                StringBuilder metaSb = new StringBuilder();
+                if (node.duration > 0) metaSb.append(formatDuration(node.duration));
+                if (node.size > 0) {
+                    if (metaSb.length() > 0) metaSb.append("  |  ");
+                    metaSb.append(formatFileSize(node.size));
+                }
+                if (metaSb.length() > 0) {
+                    TextView itemMeta = new TextView(this);
+                    itemMeta.setText(metaSb.toString());
+                    itemMeta.setTextSize(11);
+                    itemMeta.setTextColor(Color.GRAY);
+                    infoBox.addView(itemMeta);
+                }
+
+                itemRow.addView(infoBox);
+
+                String playUrl = !node.streamUrl.isEmpty() ? node.streamUrl : node.downloadUrl;
+                if (!playUrl.isEmpty()) {
+                    Button actionBtn = new Button(this);
+                    actionBtn.setText(node.isAudio() ? "播放/直链" : "查看直链");
+                    actionBtn.setTextSize(12);
+                    actionBtn.setPadding(dp(8), dp(2), dp(8), dp(2));
+                    actionBtn.setOnClickListener(v -> showTrackActionDialog(node, playUrl));
+                    itemRow.addView(actionBtn);
+                }
+
+                itemRow.setOnClickListener(v -> {
+                    if (!playUrl.isEmpty()) {
+                        showTrackActionDialog(node, playUrl);
+                    }
+                });
+
+                container.addView(itemRow);
+            }
+        }
+    }
+
+    private void showTrackActionDialog(AsmrTrackNode node, String url) {
+        String[] actions;
+        if (node.isAudio()) {
+            actions = new String[]{"外部应用播放 (调用播放器)", "复制播放流直链", "复制下载直链 (如有)", "查看完整地址"};
+        } else {
+            actions = new String[]{"外部应用打开", "复制文件直链", "查看完整地址"};
+        }
+
+        new AlertDialog.Builder(this)
+                .setTitle(node.title)
+                .setItems(actions, (dialog, which) -> {
+                    android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                    if (node.isAudio()) {
+                        if (which == 0) {
+                            try {
+                                android.content.Intent intent = new android.content.Intent(android.content.Intent.ACTION_VIEW);
+                                intent.setDataAndType(Uri.parse(url), "audio/*");
+                                intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                                startActivity(intent);
+                            } catch (Throwable e) {
+                                Toast.makeText(this, "启动播放器失败：" + e.getMessage(), Toast.LENGTH_SHORT).show();
+                            }
+                        } else if (which == 1) {
+                            if (cm != null) {
+                                cm.setPrimaryClip(android.content.ClipData.newPlainText("audio_stream", url));
+                                Toast.makeText(this, "播放流地址已复制到剪贴板", Toast.LENGTH_SHORT).show();
+                            }
+                        } else if (which == 2) {
+                            String dUrl = !node.downloadUrl.isEmpty() ? node.downloadUrl : url;
+                            if (cm != null) {
+                                cm.setPrimaryClip(android.content.ClipData.newPlainText("audio_download", dUrl));
+                                Toast.makeText(this, "下载直链已复制到剪贴板", Toast.LENGTH_SHORT).show();
+                            }
+                        } else if (which == 3) {
+                            new AlertDialog.Builder(this)
+                                    .setTitle("文件地址")
+                                    .setMessage("流地址:\n" + url + "\n\n下载地址:\n" + (node.downloadUrl.isEmpty() ? "(同上)" : node.downloadUrl))
+                                    .setPositiveButton("复制", (d, w) -> {
+                                        if (cm != null) {
+                                            cm.setPrimaryClip(android.content.ClipData.newPlainText("url", url));
+                                            Toast.makeText(this, "已复制", Toast.LENGTH_SHORT).show();
+                                        }
+                                    })
+                                    .setNegativeButton("关闭", null)
+                                    .show();
+                        }
+                    } else {
+                        if (which == 0) {
+                            try {
+                                android.content.Intent intent = new android.content.Intent(android.content.Intent.ACTION_VIEW);
+                                intent.setData(Uri.parse(url));
+                                intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                                startActivity(intent);
+                            } catch (Throwable e) {
+                                Toast.makeText(this, "打开失败：" + e.getMessage(), Toast.LENGTH_SHORT).show();
+                            }
+                        } else if (which == 1) {
+                            if (cm != null) {
+                                cm.setPrimaryClip(android.content.ClipData.newPlainText("url", url));
+                                Toast.makeText(this, "文件直链已复制到剪贴板", Toast.LENGTH_SHORT).show();
+                            }
+                        } else if (which == 2) {
+                            new AlertDialog.Builder(this)
+                                    .setTitle("文件地址")
+                                    .setMessage(url)
+                                    .setPositiveButton("复制", (d, w) -> {
+                                        if (cm != null) {
+                                            cm.setPrimaryClip(android.content.ClipData.newPlainText("url", url));
+                                            Toast.makeText(this, "已复制", Toast.LENGTH_SHORT).show();
+                                        }
+                                    })
+                                    .setNegativeButton("关闭", null)
+                                    .show();
+                        }
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
