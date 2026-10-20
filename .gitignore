@@ -1,0 +1,5 @@
+*.hprof
+.gradle/
+build/
+app/build/
+local.properties

@@ -15,8 +15,16 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.ImageView;
 import android.widget.ScrollView;
+import android.widget.HorizontalScrollView;
+import android.view.View;
 import android.view.ViewGroup;
 import android.view.Gravity;
+
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 
 import org.json.JSONObject;
 import org.json.JSONArray;
@@ -97,6 +105,7 @@ public class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        setupEdgeToEdgeAndSystemBars();
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
 
         LinearLayout root = new LinearLayout(this);
@@ -160,6 +169,93 @@ public class MainActivity extends Activity {
         }
     }
 
+    @Override
+    public void setContentView(View view) {
+        super.setContentView(view);
+        applySafeAreaInsets(view);
+    }
+
+    @Override
+    public void setContentView(View view, ViewGroup.LayoutParams params) {
+        super.setContentView(view, params);
+        applySafeAreaInsets(view);
+    }
+
+    @Override
+    public void setContentView(int layoutResID) {
+        super.setContentView(layoutResID);
+        View content = findViewById(android.R.id.content);
+        if (content != null) {
+            applySafeAreaInsets(content);
+        }
+    }
+
+    private void setupEdgeToEdgeAndSystemBars() {
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+        getWindow().setStatusBarColor(Color.TRANSPARENT);
+        getWindow().setNavigationBarColor(Color.TRANSPARENT);
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            getWindow().getAttributes().layoutInDisplayCutoutMode =
+                    android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            getWindow().setStatusBarContrastEnforced(false);
+            getWindow().setNavigationBarContrastEnforced(false);
+        }
+        WindowInsetsControllerCompat insetsController = WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+        if (insetsController != null) {
+            insetsController.setAppearanceLightStatusBars(true);
+            insetsController.setAppearanceLightNavigationBars(true);
+        }
+    }
+
+    private void applySafeAreaInsets(View view) {
+        if (view == null) return;
+        int[] basePadding;
+        if (view.getTag() instanceof int[]) {
+            basePadding = (int[]) view.getTag();
+        } else {
+            basePadding = new int[]{
+                    view.getPaddingLeft(),
+                    view.getPaddingTop(),
+                    view.getPaddingRight(),
+                    view.getPaddingBottom()
+            };
+            view.setTag(basePadding);
+        }
+        final int initialLeft = basePadding[0];
+        final int initialTop = basePadding[1];
+        final int initialRight = basePadding[2];
+        final int initialBottom = basePadding[3];
+
+        ViewCompat.setOnApplyWindowInsetsListener(view, (v, windowInsets) -> {
+            Insets insets = windowInsets.getInsets(
+                    WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout()
+            );
+            v.setPadding(
+                    initialLeft + insets.left,
+                    initialTop + insets.top,
+                    initialRight + insets.right,
+                    initialBottom + insets.bottom
+            );
+            return windowInsets;
+        });
+
+        WindowInsetsCompat rootInsets = ViewCompat.getRootWindowInsets(getWindow().getDecorView());
+        if (rootInsets != null) {
+            Insets insets = rootInsets.getInsets(
+                    WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout()
+            );
+            view.setPadding(
+                    initialLeft + insets.left,
+                    initialTop + insets.top,
+                    initialRight + insets.right,
+                    initialBottom + insets.bottom
+            );
+        }
+        ViewCompat.requestApplyInsets(view);
+    }
+
     private void showAsmrBrowser() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -170,7 +266,10 @@ public class MainActivity extends Activity {
         Button refresh = new Button(this); refresh.setText("刷新"); refresh.setOnClickListener(v -> loadAsmrPage(asmrPage)); bar.addView(refresh);
         Button login = new Button(this); login.setText(asmrAuthorization.isEmpty() ? "登录" : (asmrUsername.isEmpty() ? "已登录" : asmrUsername)); login.setOnClickListener(v -> showAsmrLogin()); bar.addView(login);
         Button diag = new Button(this); diag.setText("诊断日志"); diag.setOnClickListener(v -> showAsmrDiagnostics()); bar.addView(diag);
-        root.addView(bar);
+        HorizontalScrollView barScroll = new HorizontalScrollView(this);
+        barScroll.setHorizontalScrollBarEnabled(false);
+        barScroll.addView(bar, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(barScroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         statusView = new TextView(this);
         statusView.setText(asmrUseXray ? "ASMR HTML · Xray 已开启" : "ASMR HTML · HTTPS 直连");
         root.addView(statusView);
@@ -183,12 +282,47 @@ public class MainActivity extends Activity {
     }
 
     private void showHomeScreenSafe() {
-        LinearLayout root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL); root.setPadding(dp(20),dp(20),dp(20),dp(20));
-        googleButton = new Button(this); googleButton.setText("Access Google"); googleButton.setOnClickListener(v -> runGoogleTest()); root.addView(googleButton);
-        statusView = new TextView(this); statusView.setText(coreStarted ? "Xray Core started" : "Starting Xray Core…"); root.addView(statusView);
-        responseView = new TextView(this); ScrollView scroll = new ScrollView(this); scroll.addView(responseView); root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
-        Button asmr = new Button(this); asmr.setText("打开 ASMR 浏览器"); asmr.setOnClickListener(v -> showAsmrBrowser()); root.addView(asmr,0);
-        Button subscriptions = new Button(this); subscriptions.setText("代理订阅 / 更新节点"); subscriptions.setOnClickListener(v -> showSubscriptionManager()); root.addView(subscriptions,1);
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(dp(20), dp(20), dp(20), dp(20));
+
+        googleButton = new Button(this);
+        googleButton.setText("Access Google");
+        googleButton.setAllCaps(false);
+        googleButton.setOnClickListener(v -> runGoogleTest());
+        root.addView(googleButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        statusView = new TextView(this);
+        statusView.setText(coreStarted ? "Xray Core started" : "Starting Xray Core…");
+        statusView.setGravity(Gravity.START);
+        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        statusParams.topMargin = dp(16);
+        root.addView(statusView, statusParams);
+
+        responseView = new TextView(this);
+        responseView.setTextIsSelectable(true);
+        responseView.setGravity(Gravity.TOP | Gravity.START);
+        responseView.setTextSize(12);
+        ScrollView responseScroll = new ScrollView(this);
+        responseScroll.addView(responseView, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams responseParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+        responseParams.topMargin = dp(12);
+        root.addView(responseScroll, responseParams);
+
+        Button asmr = new Button(this);
+        asmr.setText("打开 ASMR 浏览器");
+        asmr.setOnClickListener(v -> showAsmrBrowser());
+        root.addView(asmr, 0, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        Button subscriptions = new Button(this);
+        subscriptions.setText("代理订阅 / 更新节点");
+        subscriptions.setOnClickListener(v -> showSubscriptionManager());
+        root.addView(subscriptions, 1, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
         setContentView(root);
     }
 

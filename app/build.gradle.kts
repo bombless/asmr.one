@@ -38,4 +38,5 @@ android {
 
 dependencies {
     implementation(files("libs/libv2ray-dial.aar"))
+    implementation("androidx.core:core:1.15.0")
 }
