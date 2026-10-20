@@ -3,7 +3,10 @@ package com.example.xraylocal;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.os.Bundle;
+import android.content.Intent;
 import android.graphics.Color;
+import android.graphics.Typeface;
+import android.provider.Settings;
 import android.content.SharedPreferences;
 import android.net.Uri;
 import android.media.MediaPlayer;
@@ -122,6 +125,13 @@ public class MainActivity extends Activity {
     private SeekBar playerSeekBar;
     private boolean isUserTrackingSeekBar = false;
 
+    // Subtitle & Floating lyrics overlay fields
+    private TextView playerSubtitleView;
+    private Button playerFloatingBtn;
+    private java.util.List<VttSubtitleParser.Cue> currentSubtitles = new java.util.ArrayList<>();
+    private java.util.List<AsmrTrackNode> currentTrackNodes = new java.util.ArrayList<>();
+    private String currentPlayingSubtitleText = "";
+
     public boolean isAsmrUseXray() {
         return asmrUseXray;
     }
@@ -213,6 +223,23 @@ public class MainActivity extends Activity {
         root.addView(subscriptionsButton, 1, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         setContentView(root);
         io.execute(this::startXray);
+
+        // Setup FloatingSubtitleService callback
+        FloatingSubtitleService.setControlListener(new FloatingSubtitleService.FloatingControlListener() {
+            @Override
+            public void onFloatingTogglePlay() {
+                runOnUiThread(() -> toggleAudioPlayback());
+            }
+
+            @Override
+            public void onFloatingClose() {
+                runOnUiThread(() -> {
+                    if (playerFloatingBtn != null) {
+                        playerFloatingBtn.setText("悬浮歌词");
+                    }
+                });
+            }
+        });
     }
 
     public static final int ASMR_MODE_CATALOG = 0;
@@ -1942,6 +1969,7 @@ public class MainActivity extends Activity {
                 String tracksUrl = "https://api.asmr-200.com/api/tracks/" + numericId + "?v=2";
                 JSONArray arr = fetchAsmrJsonArray(tracksUrl);
                 java.util.ArrayList<AsmrTrackNode> nodes = parseAsmrTracksJson(arr);
+                currentTrackNodes = nodes;
                 int[] stats = new int[3]; // [folders, totalFiles, audioFiles]
                 countTracks(nodes, stats);
                 asmrLog("I", "作品目录加载成功 workId=" + work.id + " folders=" + stats[0] + " files=" + stats[1] + " audio=" + stats[2], null);
@@ -2859,6 +2887,8 @@ public class MainActivity extends Activity {
     private void showError(String message){runOnUiThread(()->Toast.makeText(this,message,Toast.LENGTH_LONG).show());}
     @Override protected void onDestroy(){
         stopAudioPlayback();
+        FloatingSubtitleService.stop(this);
+        FloatingSubtitleService.setControlListener(null);
         if (mediaProxyServer != null) {
             mediaProxyServer.stop();
             mediaProxyServer = null;
@@ -2897,6 +2927,13 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
         topRow.addView(playerTitleView, titleParams);
 
+        playerFloatingBtn = new Button(this);
+        playerFloatingBtn.setText(FloatingSubtitleService.isRunning() ? "关闭悬浮" : "悬浮歌词");
+        playerFloatingBtn.setTextSize(11);
+        playerFloatingBtn.setPadding(dp(6), dp(0), dp(6), dp(0));
+        playerFloatingBtn.setOnClickListener(v -> toggleFloatingSubtitleWindow());
+        topRow.addView(playerFloatingBtn);
+
         Button closeBtn = new Button(this);
         closeBtn.setText("✕");
         closeBtn.setTextSize(12);
@@ -2905,6 +2942,17 @@ public class MainActivity extends Activity {
         topRow.addView(closeBtn);
 
         playerBarView.addView(topRow);
+
+        // Subtitle display row (matching web #lyricsBar / #lyric)
+        playerSubtitleView = new TextView(this);
+        playerSubtitleView.setText("");
+        playerSubtitleView.setTextSize(13);
+        playerSubtitleView.setTextColor(Color.rgb(156, 39, 176));
+        playerSubtitleView.setTypeface(Typeface.DEFAULT_BOLD);
+        playerSubtitleView.setGravity(Gravity.CENTER);
+        playerSubtitleView.setPadding(dp(4), dp(3), dp(4), dp(3));
+        playerSubtitleView.setVisibility(View.GONE);
+        playerBarView.addView(playerSubtitleView);
 
         // Middle row: SeekBar + Time label
         LinearLayout progressRow = new LinearLayout(this);
@@ -3005,6 +3053,139 @@ public class MainActivity extends Activity {
         return playerBarView;
     }
 
+    private void toggleFloatingSubtitleWindow() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+            if (!Settings.canDrawOverlays(this)) {
+                new AlertDialog.Builder(this)
+                        .setTitle("需要“悬浮窗/显示在其他应用上层”权限")
+                        .setMessage("为了在其他应用之上显示 ASMR 同步悬浮歌词，请在系统设置中授予悬浮窗权限。")
+                        .setPositiveButton("去开启", (dialog, which) -> {
+                            try {
+                                Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                        Uri.parse("package:" + getPackageName()));
+                                startActivity(intent);
+                            } catch (Throwable e) {
+                                Toast.makeText(this, "无法打开设置页面：" + e.getMessage(), Toast.LENGTH_SHORT).show();
+                            }
+                        })
+                        .setNegativeButton("取消", null)
+                        .show();
+                return;
+            }
+        }
+
+        if (FloatingSubtitleService.isRunning()) {
+            FloatingSubtitleService.stop(this);
+            if (playerFloatingBtn != null) {
+                playerFloatingBtn.setText("悬浮歌词");
+            }
+            Toast.makeText(this, "悬浮歌词已关闭", Toast.LENGTH_SHORT).show();
+        } else {
+            FloatingSubtitleService.start(this);
+            if (playerFloatingBtn != null) {
+                playerFloatingBtn.setText("关闭悬浮");
+            }
+            FloatingSubtitleService.updateSubtitle(
+                    currentPlayingSubtitleText,
+                    currentPlayingTitle,
+                    mediaPlayer != null && mediaPlayer.isPlaying()
+            );
+            Toast.makeText(this, "已开启桌面悬浮歌词", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void loadMatchingSubtitleAsync(String audioTitle) {
+        if (currentTrackNodes == null || currentTrackNodes.isEmpty()) return;
+
+        io.execute(() -> {
+            try {
+                // Find all subtitle nodes (.vtt, .lrc)
+                java.util.List<AsmrTrackNode> subtitleNodes = new java.util.ArrayList<>();
+                collectSubtitleNodes(currentTrackNodes, subtitleNodes);
+
+                if (subtitleNodes.isEmpty()) {
+                    asmrLog("I", "No subtitle files (.vtt/.lrc) found in current track tree", null);
+                    return;
+                }
+
+                // Match subtitle file to audio title
+                AsmrTrackNode bestMatch = findBestSubtitleMatch(audioTitle, subtitleNodes);
+                if (bestMatch == null) {
+                    asmrLog("I", "No matching subtitle found for audio: " + audioTitle, null);
+                    return;
+                }
+
+                String subUrl = !bestMatch.downloadUrl.isEmpty() ? bestMatch.downloadUrl : bestMatch.streamUrl;
+                if (subUrl.isEmpty()) return;
+
+                asmrLog("I", "Loading subtitle for [" + audioTitle + "] from: " + bestMatch.title + " url=" + subUrl, null);
+                String subContent = executeAsmrApi("GET", subUrl, null);
+                java.util.List<VttSubtitleParser.Cue> parsed = VttSubtitleParser.parse(subContent);
+                asmrLog("I", "Parsed " + parsed.size() + " subtitle cues for " + bestMatch.title, null);
+
+                runOnUiThread(() -> {
+                    currentSubtitles = parsed;
+                    if (playerSubtitleView != null && !currentSubtitles.isEmpty()) {
+                        playerSubtitleView.setVisibility(View.VISIBLE);
+                        playerSubtitleView.setText("💬 已加载字幕: " + bestMatch.title);
+                    }
+                    FloatingSubtitleService.updateSubtitle(
+                            "💬 已加载字幕: " + bestMatch.title,
+                            currentPlayingTitle,
+                            mediaPlayer != null && mediaPlayer.isPlaying()
+                    );
+                });
+            } catch (Throwable e) {
+                asmrLog("W", "Failed to fetch/parse subtitle for " + audioTitle, e);
+            }
+        });
+    }
+
+    private void collectSubtitleNodes(java.util.List<AsmrTrackNode> nodes, java.util.List<AsmrTrackNode> out) {
+        if (nodes == null) return;
+        for (AsmrTrackNode node : nodes) {
+            if (node.isFolder()) {
+                collectSubtitleNodes(node.children, out);
+            } else {
+                String name = node.title.toLowerCase(java.util.Locale.ROOT);
+                if (name.endsWith(".vtt") || name.endsWith(".lrc")) {
+                    out.add(node);
+                }
+            }
+        }
+    }
+
+    private AsmrTrackNode findBestSubtitleMatch(String audioTitle, java.util.List<AsmrTrackNode> subtitles) {
+        if (subtitles.isEmpty()) return null;
+        if (subtitles.size() == 1) return subtitles.get(0);
+
+        String baseAudio = removeFileExtension(audioTitle).toLowerCase(java.util.Locale.ROOT);
+
+        // 1. Exact base name match
+        for (AsmrTrackNode sub : subtitles) {
+            String baseSub = removeFileExtension(sub.title).toLowerCase(java.util.Locale.ROOT);
+            if (baseAudio.equals(baseSub)) {
+                return sub;
+            }
+        }
+
+        // 2. Contains match
+        for (AsmrTrackNode sub : subtitles) {
+            String baseSub = removeFileExtension(sub.title).toLowerCase(java.util.Locale.ROOT);
+            if (baseAudio.contains(baseSub) || baseSub.contains(baseAudio)) {
+                return sub;
+            }
+        }
+
+        // 3. Fallback to first
+        return subtitles.get(0);
+    }
+
+    private String removeFileExtension(String filename) {
+        int idx = filename.lastIndexOf('.');
+        return idx > 0 ? filename.substring(0, idx) : filename;
+    }
+
     private void playAudioInApp(String title, String url) {
         if (title == null) title = "音频播放";
         currentPlayingTitle = title;
@@ -3026,6 +3207,15 @@ public class MainActivity extends Activity {
         if (playerSeekBar != null) {
             playerSeekBar.setProgress(0);
         }
+        if (playerSubtitleView != null) {
+            playerSubtitleView.setVisibility(View.GONE);
+            playerSubtitleView.setText("");
+        }
+        currentSubtitles.clear();
+        currentPlayingSubtitleText = "";
+
+        // Attempt to find and load matching subtitle/lyric file (.vtt or .lrc)
+        loadMatchingSubtitleAsync(title);
 
         io.execute(() -> {
             try {
@@ -3151,6 +3341,15 @@ public class MainActivity extends Activity {
         isPreparingMedia = false;
         currentPlayingUrl = "";
         currentPlayingTitle = "";
+        currentPlayingSubtitleText = "";
+        currentSubtitles.clear();
+        if (playerSubtitleView != null) {
+            playerSubtitleView.setVisibility(View.GONE);
+            playerSubtitleView.setText("");
+        }
+        if (FloatingSubtitleService.isRunning()) {
+            FloatingSubtitleService.updateSubtitle("", "", false);
+        }
         if (playerBarView != null) {
             playerBarView.setVisibility(View.GONE);
         }
@@ -3188,6 +3387,29 @@ public class MainActivity extends Activity {
             }
             if (playerTimeView != null) {
                 playerTimeView.setText(formatDuration(current / 1000.0) + " / " + formatDuration(duration > 0 ? duration / 1000.0 : 0));
+            }
+
+            // Sync subtitle for current playback position
+            if (currentSubtitles != null && !currentSubtitles.isEmpty()) {
+                String cueText = VttSubtitleParser.getCueText(currentSubtitles, current);
+                if (!cueText.equals(currentPlayingSubtitleText)) {
+                    currentPlayingSubtitleText = cueText;
+                    if (playerSubtitleView != null) {
+                        if (!cueText.isEmpty()) {
+                            playerSubtitleView.setVisibility(View.VISIBLE);
+                            playerSubtitleView.setText(cueText);
+                        } else {
+                            playerSubtitleView.setText("");
+                        }
+                    }
+                    if (FloatingSubtitleService.isRunning()) {
+                        FloatingSubtitleService.updateSubtitle(
+                                cueText,
+                                currentPlayingTitle,
+                                mediaPlayer != null && mediaPlayer.isPlaying()
+                        );
+                    }
+                }
             }
         } catch (Exception ignored) {}
     }
