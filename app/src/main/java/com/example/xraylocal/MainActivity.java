@@ -21,6 +21,8 @@ import android.widget.TextView;
 import android.widget.ImageView;
 import android.widget.ScrollView;
 import android.widget.HorizontalScrollView;
+import android.widget.Spinner;
+import android.widget.ArrayAdapter;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Gravity;
@@ -213,13 +215,30 @@ public class MainActivity extends Activity {
         io.execute(this::startXray);
     }
 
+    public static final int ASMR_MODE_CATALOG = 0;
+    public static final int ASMR_MODE_PROGRESS = 1;
+    public static final int ASMR_MODE_REVIEW = 2;
+
+    private int asmrMode = ASMR_MODE_CATALOG;
+    private String asmrProgressFilter = "marked";
+    private String asmrSortOrder = "updated_at";
+    private String asmrSortDir = "desc";
+    private int asmrTotalCount = 0;
+
     private final java.util.ArrayList<AsmrWork> asmrWorks = new java.util.ArrayList<>();
-    private int asmrPage = 2;
+    private int asmrPage = 1;
     private LinearLayout asmrContent;
     private ScrollView asmrScroll;
 
     private static final class AsmrWork {
         String id, title, cover, date, circle, url;
+        long numericId = 0;
+        Integer userRating = null;
+        String reviewText = null;
+        String progress = null;
+        String updatedAt = null;
+        String vas = null;
+
         AsmrWork(String id, String title, String cover, String date, String circle, String url) {
             this.id=id; this.title=title; this.cover=cover; this.date=date; this.circle=circle; this.url=url;
         }
@@ -344,18 +363,133 @@ public class MainActivity extends Activity {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(12), dp(8), dp(12), dp(8));
+
         LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+
         Button back = new Button(this); back.setText("返回"); back.setOnClickListener(v -> showHomeScreenSafe()); bar.addView(back);
+
+        Button catalogBtn = new Button(this);
+        catalogBtn.setText("作品浏览");
+        if (asmrMode == ASMR_MODE_CATALOG) {
+            catalogBtn.setTextColor(Color.rgb(30, 100, 220));
+            catalogBtn.setTypeface(null, android.graphics.Typeface.BOLD);
+        }
+        catalogBtn.setOnClickListener(v -> {
+            if (asmrMode != ASMR_MODE_CATALOG) {
+                asmrMode = ASMR_MODE_CATALOG;
+                asmrPage = 1;
+                showAsmrBrowser();
+            }
+        });
+        bar.addView(catalogBtn);
+
+        Button progressBtn = new Button(this);
+        progressBtn.setText("我的进度");
+        if (asmrMode == ASMR_MODE_PROGRESS) {
+            progressBtn.setTextColor(Color.rgb(30, 100, 220));
+            progressBtn.setTypeface(null, android.graphics.Typeface.BOLD);
+        }
+        progressBtn.setOnClickListener(v -> {
+            if (asmrMode != ASMR_MODE_PROGRESS) {
+                asmrMode = ASMR_MODE_PROGRESS;
+                asmrPage = 1;
+                showAsmrBrowser();
+            }
+        });
+        bar.addView(progressBtn);
+
+        Button reviewBtn = new Button(this);
+        reviewBtn.setText("我的评价");
+        if (asmrMode == ASMR_MODE_REVIEW) {
+            reviewBtn.setTextColor(Color.rgb(30, 100, 220));
+            reviewBtn.setTypeface(null, android.graphics.Typeface.BOLD);
+        }
+        reviewBtn.setOnClickListener(v -> {
+            if (asmrMode != ASMR_MODE_REVIEW) {
+                asmrMode = ASMR_MODE_REVIEW;
+                asmrPage = 1;
+                showAsmrBrowser();
+            }
+        });
+        bar.addView(reviewBtn);
+
+        Button refresh = new Button(this); refresh.setText("刷新"); refresh.setOnClickListener(v -> loadAsmrCurrentView()); bar.addView(refresh);
         Button settings = new Button(this); settings.setText("代理设置"); settings.setOnClickListener(v -> showAsmrSettings()); bar.addView(settings);
-        Button refresh = new Button(this); refresh.setText("刷新"); refresh.setOnClickListener(v -> loadAsmrPage(asmrPage)); bar.addView(refresh);
         Button login = new Button(this); login.setText(asmrAuthorization.isEmpty() ? "登录" : (asmrUsername.isEmpty() ? "已登录" : asmrUsername)); login.setOnClickListener(v -> showAsmrLogin()); bar.addView(login);
         Button diag = new Button(this); diag.setText("诊断日志"); diag.setOnClickListener(v -> showAsmrDiagnostics()); bar.addView(diag);
+
         HorizontalScrollView barScroll = new HorizontalScrollView(this);
         barScroll.setHorizontalScrollBarEnabled(false);
         barScroll.addView(bar, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         root.addView(barScroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        if (asmrMode == ASMR_MODE_PROGRESS || asmrMode == ASMR_MODE_REVIEW) {
+            LinearLayout subBar = new LinearLayout(this);
+            subBar.setOrientation(LinearLayout.HORIZONTAL);
+            subBar.setGravity(Gravity.CENTER_VERTICAL);
+            subBar.setPadding(0, dp(4), 0, dp(4));
+
+            if (asmrMode == ASMR_MODE_PROGRESS) {
+                String[] filters = { "marked", "listening", "listened", "replay", "postponed" };
+                for (String f : filters) {
+                    Button fBtn = new Button(this);
+                    fBtn.setText(getProgressLabel(f));
+                    fBtn.setTextSize(12);
+                    boolean active = f.equals(asmrProgressFilter);
+                    if (active) {
+                        fBtn.setTextColor(Color.rgb(30, 100, 220));
+                        fBtn.setTypeface(null, android.graphics.Typeface.BOLD);
+                    } else {
+                        fBtn.setTextColor(Color.DKGRAY);
+                    }
+                    fBtn.setPadding(dp(6), dp(2), dp(6), dp(2));
+                    fBtn.setOnClickListener(v -> {
+                        asmrProgressFilter = f;
+                        asmrPage = 1;
+                        showAsmrBrowser();
+                    });
+                    subBar.addView(fBtn);
+                }
+            }
+
+            Button exportBtn = new Button(this);
+            exportBtn.setText("导出到歌单");
+            exportBtn.setTextSize(12);
+            exportBtn.setPadding(dp(6), dp(2), dp(6), dp(2));
+            exportBtn.setOnClickListener(v -> showExportPlaylistDialog());
+            subBar.addView(exportBtn);
+
+            Button sortBtn = new Button(this);
+            sortBtn.setText("排序: " + getSortOrderName(asmrSortOrder) + " ▼");
+            sortBtn.setTextSize(12);
+            sortBtn.setPadding(dp(6), dp(2), dp(6), dp(2));
+            sortBtn.setOnClickListener(v -> showSortOrderDialog());
+            subBar.addView(sortBtn);
+
+            if (!"allage".equals(asmrSortOrder) && !"nsfw".equals(asmrSortOrder)) {
+                Button dirBtn = new Button(this);
+                dirBtn.setText("desc".equals(asmrSortDir) ? "降序 ↓" : "升序 ↑");
+                dirBtn.setTextSize(12);
+                dirBtn.setPadding(dp(6), dp(2), dp(6), dp(2));
+                dirBtn.setOnClickListener(v -> {
+                    asmrSortDir = "desc".equals(asmrSortDir) ? "asc" : "desc";
+                    asmrPage = 1;
+                    showAsmrBrowser();
+                });
+                subBar.addView(dirBtn);
+            }
+
+            HorizontalScrollView subBarScroll = new HorizontalScrollView(this);
+            subBarScroll.setHorizontalScrollBarEnabled(false);
+            subBarScroll.addView(subBar, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            root.addView(subBarScroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        }
+
         statusView = new TextView(this);
-        statusView.setText(asmrUseXray ? "ASMR HTML · Xray 已开启" : "ASMR HTML · HTTPS 直连");
+        String modeDesc = asmrMode == ASMR_MODE_CATALOG ? "作品浏览" : (asmrMode == ASMR_MODE_PROGRESS ? ("我的进度 · " + getProgressLabel(asmrProgressFilter)) : "我的评价");
+        statusView.setText("ASMR · " + modeDesc + " (" + (asmrUseXray ? "Xray 已开启" : "HTTPS 直连") + ")");
         root.addView(statusView);
         asmrScroll = new ScrollView(this);
         asmrContent = new LinearLayout(this); asmrContent.setOrientation(LinearLayout.VERTICAL);
@@ -363,7 +497,7 @@ public class MainActivity extends Activity {
         root.addView(asmrScroll, new LinearLayout.LayoutParams(-1, 0, 1));
         root.addView(createPlayerBarView(), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         setContentView(root);
-        loadAsmrPage(asmrPage);
+        loadAsmrCurrentView();
     }
 
     private void showHomeScreenSafe() {
@@ -770,15 +904,61 @@ public class MainActivity extends Activity {
         LinearLayout form = new LinearLayout(this);
         form.setOrientation(LinearLayout.VERTICAL);
         int pad = dp(16); form.setPadding(pad, pad, pad, pad);
+
+        TextView tipAcc = new TextView(this);
+        tipAcc.setText("方式一：账号密码登录");
+        tipAcc.setTextSize(14);
+        tipAcc.setTextColor(Color.rgb(30, 100, 220));
+        tipAcc.setPadding(0, 0, 0, dp(4));
+        form.addView(tipAcc);
+
         EditText username = new EditText(this); username.setSingleLine(true); username.setHint("ASMR 用户名 / 邮箱"); username.setInputType(android.text.InputType.TYPE_CLASS_TEXT);
         EditText password = new EditText(this); password.setSingleLine(true); password.setHint("密码"); password.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
         form.addView(username); form.addView(password);
+
+        TextView tipToken = new TextView(this);
+        tipToken.setText("\n方式二：直接粘贴 Token (Bearer JWT)");
+        tipToken.setTextSize(14);
+        tipToken.setTextColor(Color.rgb(30, 100, 220));
+        tipToken.setPadding(0, dp(8), 0, dp(4));
+        form.addView(tipToken);
+
+        EditText tokenInput = new EditText(this);
+        tokenInput.setHint("如: eyJhbGciOi...");
+        tokenInput.setMaxLines(3);
+        form.addView(tokenInput);
+
         AlertDialog dialog = new AlertDialog.Builder(this).setTitle("ASMR 账号登录")
-            .setMessage("使用站点原生 API 提交账号密码，不打开 WebView；凭证保存在本地以保持登录。")
-            .setView(form).setNegativeButton("取消", null).setPositiveButton("登录", null).create();
+            .setMessage("使用站点原生 API 提交凭据，不打开 WebView；凭证保存在本地以保持登录。")
+            .setView(form).setNegativeButton("取消", null).setPositiveButton("登录 / 保存", null).create();
         dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            String rawToken = tokenInput.getText().toString().trim();
+            if (!rawToken.isEmpty()) {
+                if (rawToken.startsWith("Bearer ") || rawToken.startsWith("bearer ")) {
+                    rawToken = rawToken.substring(7).trim();
+                }
+                String extractedName = "已登录用户";
+                try {
+                    String[] parts = rawToken.split("\\.");
+                    if (parts.length >= 2) {
+                        byte[] payloadBytes = Base64.decode(parts[1], Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
+                        JSONObject pl = new JSONObject(new String(payloadBytes, StandardCharsets.UTF_8));
+                        if (pl.has("name")) extractedName = pl.optString("name");
+                        else if (pl.has("username")) extractedName = pl.optString("username");
+                    }
+                } catch (Throwable ignoredTokenParse) {}
+                asmrAuthorization = "Bearer " + rawToken;
+                asmrUsername = extractedName;
+                prefs.edit().putString("asmr_token", rawToken).putString("asmr_username", extractedName).apply();
+                asmrLog("I", "ASMR direct token saved; username=" + extractedName, null);
+                dialog.dismiss();
+                Toast.makeText(this, "Token 保存成功（" + extractedName + "）", Toast.LENGTH_SHORT).show();
+                showAsmrBrowser();
+                return;
+            }
+
             String name = username.getText().toString().trim(); String pass = password.getText().toString();
-            if (name.length() < 5 || pass.length() < 5) { Toast.makeText(this, "用户名和密码至少需要 5 个字符", Toast.LENGTH_LONG).show(); return; }
+            if (name.length() < 5 || pass.length() < 5) { Toast.makeText(this, "请输入账号密码（至少5字符）或在下方粘贴 Token", Toast.LENGTH_LONG).show(); return; }
             Button loginButton = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
             loginButton.setEnabled(false);
             loginButton.setText("连接中…");
@@ -919,22 +1099,76 @@ public class MainActivity extends Activity {
         } finally { if (c != null) c.disconnect(); }
     }
 
-    private JSONArray fetchAsmrJsonArray(String urlText) throws Exception {
+    private static String getProgressLabel(String filter) {
+        if ("marked".equals(filter)) return "想听";
+        if ("listening".equals(filter)) return "在听";
+        if ("listened".equals(filter)) return "听过";
+        if ("replay".equals(filter)) return "重听";
+        if ("postponed".equals(filter)) return "搁置";
+        return filter == null ? "" : filter;
+    }
+
+    private static String getSortOrderName(String order) {
+        if ("updated_at".equals(order)) return "标记时间";
+        if ("userRating".equals(order)) return "我的评分";
+        if ("release".equals(order)) return "发售日期";
+        if ("rating".equals(order)) return "全站评价";
+        if ("dl_count".equals(order)) return "售出数";
+        if ("price".equals(order)) return "价格";
+        if ("rate_average_2dp".equals(order)) return "评分";
+        if ("review_count".equals(order)) return "评价数";
+        if ("allage".equals(order)) return "全年龄";
+        if ("nsfw".equals(order)) return "R18";
+        return order;
+    }
+
+    private void showSortOrderDialog() {
+        final String[] orderKeys = { "updated_at", "userRating", "release", "rating", "dl_count", "price", "rate_average_2dp", "review_count", "allage", "nsfw" };
+        final String[] orderLabels = new String[orderKeys.length];
+        int selectedIndex = 0;
+        for (int i = 0; i < orderKeys.length; i++) {
+            orderLabels[i] = getSortOrderName(orderKeys[i]);
+            if (orderKeys[i].equals(asmrSortOrder)) selectedIndex = i;
+        }
+        new AlertDialog.Builder(this)
+            .setTitle("选择排序方式")
+            .setSingleChoiceItems(orderLabels, selectedIndex, (dialog, which) -> {
+                asmrSortOrder = orderKeys[which];
+                asmrPage = 1;
+                dialog.dismiss();
+                showAsmrBrowser();
+            })
+            .setNegativeButton("取消", null)
+            .show();
+    }
+
+    private String executeAsmrApi(String method, String urlText, String jsonBody) throws Exception {
         long started = android.os.SystemClock.elapsedRealtime();
         HttpsURLConnection c = null;
         try {
             String requestHost = new URL(urlText).getHost();
-            asmrLog("I", "API tracks request begin host=" + requestHost + " route=" + (asmrUseXray ? "Xray" : "direct") + " coreStarted=" + coreStarted + " controllerNull=" + (controller == null), null);
+            asmrLog("I", "executeAsmrApi " + method + " host=" + requestHost + " url=" + urlText + " route=" + (asmrUseXray ? "Xray" : "direct"), null);
             logDnsResolutionAsync(requestHost, asmrUseXray ? "Xray" : "direct");
             c = openHttpsConnection(urlText, asmrUseXray);
             c.setConnectTimeout(TIMEOUT_MS);
             c.setReadTimeout(30000);
             c.setInstanceFollowRedirects(true);
+            c.setRequestMethod(method);
             c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/130 Mobile Safari/537.36");
             c.setRequestProperty("Accept", "application/json, text/plain, */*");
             c.setRequestProperty("Origin", "https://asmr.one");
             c.setRequestProperty("Referer", "https://asmr.one/");
             if (!asmrAuthorization.isEmpty()) c.setRequestProperty("Authorization", asmrAuthorization);
+
+            if (jsonBody != null) {
+                c.setRequestProperty("Content-Type", "application/json");
+                c.setDoOutput(true);
+                byte[] bytes = jsonBody.getBytes(StandardCharsets.UTF_8);
+                try (OutputStream out = c.getOutputStream()) {
+                    out.write(bytes);
+                }
+            }
+
             int code = c.getResponseCode();
             InputStream in = code >= 400 ? c.getErrorStream() : c.getInputStream();
             StringBuilder body = new StringBuilder();
@@ -949,18 +1183,19 @@ public class MainActivity extends Activity {
                     }
                 }
             }
-            asmrLog("I", "API tracks response status=" + code + " type=" + c.getContentType() + " chars=" + body.length() + " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - started), null);
+            asmrLog("I", "executeAsmrApi " + method + " response code=" + code + " chars=" + body.length() + " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - started), null);
             if (code < 200 || code >= 300) {
                 if (code == 401 && !asmrAuthorization.isEmpty()) {
                     asmrAuthorization = "";
                     asmrUsername = "";
                     prefs.edit().remove("asmr_token").remove("asmr_username").apply();
                 }
-                throw new java.io.IOException("API HTTP " + code + " body=" + body.substring(0, Math.min(300, body.length())));
+                String err = extractErrorMessage(body.toString(), code);
+                throw new java.io.IOException(err);
             }
-            return new JSONArray(body.toString());
+            return body.toString();
         } catch (Throwable e) {
-            asmrLog("E", "tracks API request failed", e);
+            asmrLog("E", "executeAsmrApi failed: " + method + " " + urlText, e);
             if (e instanceof Exception) throw (Exception) e;
             throw new java.io.IOException(e);
         } finally {
@@ -969,40 +1204,159 @@ public class MainActivity extends Activity {
     }
 
     private JSONObject fetchAsmrJson(String urlText) throws Exception {
-        long started=android.os.SystemClock.elapsedRealtime(); HttpsURLConnection c=null;
-        try {
-            String requestHost = new URL(urlText).getHost();
-            asmrLog("I", "API request begin host=" + requestHost + " route=" + (asmrUseXray ? "Xray" : "direct") + " coreStarted=" + coreStarted + " controllerNull=" + (controller == null), null);
-            logDnsResolutionAsync(requestHost, asmrUseXray ? "Xray" : "direct");
-            c = openHttpsConnection(urlText, asmrUseXray);
-            c.setConnectTimeout(TIMEOUT_MS);c.setReadTimeout(30000);c.setInstanceFollowRedirects(true);
-            c.setRequestProperty("User-Agent","Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/130 Mobile Safari/537.36");
-            c.setRequestProperty("Accept","application/json, text/plain, */*");c.setRequestProperty("Origin","https://asmr.one");c.setRequestProperty("Referer","https://asmr.one/");
-            if (!asmrAuthorization.isEmpty()) c.setRequestProperty("Authorization", asmrAuthorization);
-            int code=c.getResponseCode();InputStream in=code>=400?c.getErrorStream():c.getInputStream();StringBuilder body=new StringBuilder();
-            if(in!=null)try(BufferedReader br=new BufferedReader(new InputStreamReader(in,StandardCharsets.UTF_8))){char[] buf=new char[8192];int n,total=0;while((n=br.read(buf))!=-1&&total<4*1024*1024){int keep=Math.min(n,4*1024*1024-total);body.append(buf,0,keep);total+=keep;}}
-            asmrLog("I","API response status="+code+" type="+c.getContentType()+" chars="+body.length()+" elapsedMs="+(android.os.SystemClock.elapsedRealtime()-started),null);
-            if(code<200||code>=300) {
-                if (code == 401 && !asmrAuthorization.isEmpty()) {
-                    asmrAuthorization = "";
-                    asmrUsername = "";
-                    prefs.edit().remove("asmr_token").remove("asmr_username").apply();
-                }
-                throw new java.io.IOException("API HTTP "+code+" body="+body.substring(0,Math.min(300,body.length())));
-            }
-            return new JSONObject(body.toString());
-        }catch(Throwable e){asmrLog("E","works API request failed",e);if(e instanceof Exception)throw (Exception)e;throw new java.io.IOException(e);}finally{if(c!=null)c.disconnect();}
+        String resp = executeAsmrApi("GET", urlText, null);
+        return new JSONObject(resp);
+    }
+
+    private JSONArray fetchAsmrJsonArray(String urlText) throws Exception {
+        String resp = executeAsmrApi("GET", urlText, null);
+        return new JSONArray(resp);
     }
 
     private java.util.ArrayList<AsmrWork> parseAsmrWorksJson(JSONObject json) throws Exception {
-        java.util.ArrayList<AsmrWork> out=new java.util.ArrayList<>();org.json.JSONArray works=json.optJSONArray("works");
-        if(works==null)throw new java.io.IOException("API JSON has no works array");
-        for(int i=0;i<works.length();i++){JSONObject item=works.optJSONObject(i);if(item==null)continue;String rawId=item.optString("id","");if(rawId.isEmpty())continue;
-            String id=rawId.startsWith("RJ")?rawId:"RJ"+String.format(java.util.Locale.US,"%08d",Long.parseLong(rawId));
-            String cover=item.optString("mainCoverUrl",item.optString("thumbnailCoverUrl",item.optString("samCoverUrl","")));if(cover.startsWith("/"))cover="https://api.asmr-200.com"+cover;
-            JSONObject circleObj=item.optJSONObject("circle");String circle=circleObj==null?item.optString("name",""):circleObj.optString("name","");
-            String date=item.optString("release",item.optString("create_date",""));out.add(new AsmrWork(id,item.optString("title",""),cover,date,circle,"https://asmr.one/work/"+id));}
+        java.util.ArrayList<AsmrWork> out = new java.util.ArrayList<>();
+        org.json.JSONArray works = json.optJSONArray("works");
+        if (works == null) throw new java.io.IOException("API JSON has no works array");
+
+        JSONObject pagination = json.optJSONObject("pagination");
+        if (pagination != null) {
+            asmrTotalCount = pagination.optInt("total_count", works.length());
+        } else {
+            asmrTotalCount = works.length();
+        }
+
+        for (int i = 0; i < works.length(); i++) {
+            JSONObject item = works.optJSONObject(i);
+            if (item == null) continue;
+            String rawId = item.optString("id", "");
+            long numId = 0;
+            try {
+                numId = Long.parseLong(rawId.replaceAll("[^0-9]", ""));
+            } catch (Throwable ignored) {}
+            if (rawId.isEmpty()) continue;
+            String id = rawId.startsWith("RJ") ? rawId : "RJ" + String.format(java.util.Locale.US, "%08d", numId);
+            String cover = item.optString("mainCoverUrl", item.optString("thumbnailCoverUrl", item.optString("samCoverUrl", "")));
+            if (cover.startsWith("/")) cover = "https://api.asmr-200.com" + cover;
+            JSONObject circleObj = item.optJSONObject("circle");
+            String circle = circleObj == null ? item.optString("name", "") : circleObj.optString("name", "");
+            String date = item.optString("release", item.optString("create_date", ""));
+            AsmrWork w = new AsmrWork(id, item.optString("title", ""), cover, date, circle, "https://asmr.one/work/" + id);
+            w.numericId = numId;
+
+            if (item.has("userRating") && !item.isNull("userRating")) {
+                w.userRating = item.optInt("userRating");
+            }
+            if (item.has("review_text") && !item.isNull("review_text")) {
+                w.reviewText = item.optString("review_text", "");
+            }
+            if (item.has("progress") && !item.isNull("progress")) {
+                w.progress = item.optString("progress", "");
+            }
+            if (item.has("updated_at") && !item.isNull("updated_at")) {
+                w.updatedAt = item.optString("updated_at", "");
+            }
+            JSONArray vasArr = item.optJSONArray("vas");
+            if (vasArr != null && vasArr.length() > 0) {
+                StringBuilder vaSb = new StringBuilder();
+                for (int v = 0; v < vasArr.length(); v++) {
+                    JSONObject vaObj = vasArr.optJSONObject(v);
+                    if (vaObj != null) {
+                        String vn = vaObj.optString("name", "").trim();
+                        if (!vn.isEmpty()) {
+                            if (vaSb.length() > 0) vaSb.append(", ");
+                            vaSb.append(vn);
+                        }
+                    }
+                }
+                w.vas = vaSb.toString();
+            }
+
+            out.add(w);
+        }
         return out;
+    }
+
+    private void loadAsmrCurrentView() {
+        if (asmrMode == ASMR_MODE_CATALOG) {
+            loadAsmrPage(asmrPage);
+        } else {
+            loadAsmrReviewPage(asmrPage);
+        }
+    }
+
+    private void loadAsmrReviewPage(int page) {
+        if (asmrAuthorization.isEmpty()) {
+            asmrContent.removeAllViews();
+            TextView tip = new TextView(this);
+            tip.setText("查看进度与评价需要先登录 ASMR 账号。\n请点击上方“登录”按钮登录或粘贴凭证。");
+            tip.setPadding(dp(16), dp(24), dp(16), dp(16));
+            tip.setTextSize(16);
+            asmrContent.addView(tip);
+            Button loginBtn = new Button(this);
+            loginBtn.setText("立即登录");
+            loginBtn.setOnClickListener(v -> showAsmrLogin());
+            asmrContent.addView(loginBtn);
+            return;
+        }
+
+        asmrPage = Math.max(1, page);
+        final int requestedPage = asmrPage;
+        asmrContent.removeAllViews();
+
+        String typeName = asmrMode == ASMR_MODE_PROGRESS ? ("我的进度 · " + getProgressLabel(asmrProgressFilter)) : "我的评价";
+        TextView loading = new TextView(this);
+        loading.setText("正在请求 " + typeName + " (第 " + requestedPage + " 页)…\n代理：" + (asmrUseXray ? "Xray" : "直连"));
+        loading.setPadding(0, dp(20), 0, dp(20));
+        asmrContent.addView(loading);
+
+        asmrLog("I", "ASMR review request begin page=" + requestedPage + " mode=" + asmrMode + " filter=" + asmrProgressFilter + " order=" + asmrSortOrder + " sort=" + asmrSortDir, null);
+
+        io.execute(() -> {
+            long started = android.os.SystemClock.elapsedRealtime();
+            try {
+                String actualOrder = asmrSortOrder;
+                String actualSort = asmrSortDir;
+                if ("allage".equals(asmrSortOrder)) {
+                    actualOrder = "nsfw";
+                    actualSort = "asc";
+                } else if ("nsfw".equals(asmrSortOrder)) {
+                    actualOrder = "nsfw";
+                    actualSort = "desc";
+                }
+
+                StringBuilder urlSb = new StringBuilder("https://api.asmr-200.com/api/review?");
+                urlSb.append("order=").append(Uri.encode(actualOrder));
+                urlSb.append("&sort=").append(Uri.encode(actualSort));
+                urlSb.append("&page=").append(requestedPage);
+                if (asmrMode == ASMR_MODE_PROGRESS) {
+                    urlSb.append("&filter=").append(Uri.encode(asmrProgressFilter));
+                }
+
+                JSONObject json = fetchAsmrJson(urlSb.toString());
+                java.util.ArrayList<AsmrWork> parsed = parseAsmrWorksJson(json);
+                asmrLog("I", "ASMR review loaded page=" + requestedPage + " count=" + parsed.size() + " total=" + asmrTotalCount + " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - started), null);
+
+                runOnUiThread(() -> {
+                    if (isFinishing() || asmrContent == null) return;
+                    renderAsmrReviewWorks(parsed, requestedPage);
+                });
+            } catch (Throwable e) {
+                asmrLog("E", "ASMR review load failed page=" + requestedPage, e);
+                runOnUiThread(() -> {
+                    if (isFinishing() || asmrContent == null) return;
+                    asmrContent.removeAllViews();
+                    TextView err = new TextView(this);
+                    err.setText("加载失败：\n" + e.getClass().getSimpleName() + ": " + e.getMessage() + "\n\n点击上方诊断日志查看详细信息。");
+                    err.setTextColor(Color.RED);
+                    err.setPadding(0, dp(12), 0, dp(12));
+                    asmrContent.addView(err);
+                    Button retry = new Button(this);
+                    retry.setText("重试");
+                    retry.setOnClickListener(v -> loadAsmrReviewPage(requestedPage));
+                    asmrContent.addView(retry);
+                });
+            }
+        });
     }
 
     private void loadAsmrPage(int page) {
@@ -1128,7 +1482,13 @@ public class MainActivity extends Activity {
             LinearLayout info=new LinearLayout(this);info.setOrientation(LinearLayout.VERTICAL);card.addView(info,new LinearLayout.LayoutParams(0,-2,1));
             TextView title=new TextView(this);title.setText(w.title);title.setTextSize(15);title.setTextColor(Color.rgb(25,30,40));info.addView(title);
             TextView meta=new TextView(this);meta.setText(w.id+"  "+w.date+"\n"+w.circle);meta.setTextSize(12);meta.setTextColor(Color.DKGRAY);info.addView(meta);
-            Button open=new Button(this);open.setText("查看目录");open.setOnClickListener(v->loadAsmrDetail(w));info.addView(open);
+
+            LinearLayout actionRow = new LinearLayout(this);
+            actionRow.setOrientation(LinearLayout.HORIZONTAL);
+            Button open=new Button(this);open.setText("查看目录");open.setOnClickListener(v->loadAsmrDetail(w));actionRow.addView(open);
+            Button editRev=new Button(this);editRev.setText("标记/评价");editRev.setOnClickListener(v->showReviewEditDialog(w));actionRow.addView(editRev);
+            info.addView(actionRow);
+
             card.setOnClickListener(v->loadAsmrDetail(w));
         }
         LinearLayout pager=new LinearLayout(this);Button prev=new Button(this);prev.setText("上一页");prev.setEnabled(page>1);prev.setOnClickListener(v->loadAsmrPage(page-1));pager.addView(prev);
@@ -1144,6 +1504,365 @@ public class MainActivity extends Activity {
                 finally{c.disconnect();}
             } catch(Throwable e){Log.w(TAG,"ASMR thumbnail failed: "+url,e);}
         });
+    }
+
+    private void renderAsmrReviewWorks(java.util.ArrayList<AsmrWork> works, int page) {
+        asmrWorks.clear();
+        asmrWorks.addAll(works);
+        asmrContent.removeAllViews();
+
+        String typeDesc = asmrMode == ASMR_MODE_PROGRESS ? ("我的进度 · " + getProgressLabel(asmrProgressFilter)) : "我的评价";
+        TextView heading = new TextView(this);
+        heading.setText(typeDesc + " · 第 " + page + " 页 (共 " + asmrTotalCount + " 部)");
+        heading.setTextSize(18);
+        heading.setTypeface(null, android.graphics.Typeface.BOLD);
+        heading.setPadding(0, dp(8), 0, dp(8));
+        asmrContent.addView(heading);
+
+        if (works.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText("当前分类下没有作品。\n可在作品列表中点击“标记/评价”添加。");
+            empty.setPadding(dp(12), dp(20), dp(12), dp(20));
+            asmrContent.addView(empty);
+        }
+
+        for (AsmrWork w : works) {
+            LinearLayout card = new LinearLayout(this);
+            card.setOrientation(LinearLayout.HORIZONTAL);
+            card.setPadding(dp(8), dp(8), dp(8), dp(8));
+            card.setBackgroundColor(Color.rgb(247, 248, 252));
+            LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(-1, -2);
+            cp.bottomMargin = dp(8);
+            asmrContent.addView(card, cp);
+
+            ImageView cover = new ImageView(this);
+            cover.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            LinearLayout.LayoutParams ip = new LinearLayout.LayoutParams(dp(108), dp(130));
+            ip.rightMargin = dp(10);
+            card.addView(cover, ip);
+            if (!w.cover.isEmpty()) loadAsmrThumbnail(w.cover, cover);
+
+            LinearLayout info = new LinearLayout(this);
+            info.setOrientation(LinearLayout.VERTICAL);
+            card.addView(info, new LinearLayout.LayoutParams(0, -2, 1));
+
+            TextView title = new TextView(this);
+            title.setText(w.title);
+            title.setTextSize(15);
+            title.setTextColor(Color.rgb(25, 30, 40));
+            info.addView(title);
+
+            TextView meta = new TextView(this);
+            StringBuilder metaSb = new StringBuilder();
+            metaSb.append(w.id).append("  ").append(w.date);
+            if (!w.circle.isEmpty()) metaSb.append("\n社团: ").append(w.circle);
+            if (w.vas != null && !w.vas.isEmpty()) metaSb.append("\n声优: ").append(w.vas);
+            meta.setText(metaSb.toString());
+            meta.setTextSize(12);
+            meta.setTextColor(Color.DKGRAY);
+            info.addView(meta);
+
+            // Review / Progress info badge
+            LinearLayout badgeRow = new LinearLayout(this);
+            badgeRow.setOrientation(LinearLayout.HORIZONTAL);
+            badgeRow.setPadding(0, dp(4), 0, dp(4));
+
+            if (w.progress != null && !w.progress.isEmpty()) {
+                TextView progView = new TextView(this);
+                progView.setText(getProgressLabel(w.progress));
+                progView.setTextColor(Color.rgb(30, 100, 220));
+                progView.setTextSize(12);
+                progView.setBackgroundColor(Color.rgb(230, 240, 255));
+                progView.setPadding(dp(6), dp(2), dp(6), dp(2));
+                badgeRow.addView(progView);
+            }
+
+            if (w.userRating != null && w.userRating > 0) {
+                TextView ratingView = new TextView(this);
+                StringBuilder stars = new StringBuilder();
+                for (int st = 0; st < w.userRating; st++) stars.append("★");
+                ratingView.setText(" " + stars.toString() + " (" + w.userRating + "星)");
+                ratingView.setTextColor(Color.rgb(230, 140, 20));
+                ratingView.setTextSize(12);
+                badgeRow.addView(ratingView);
+            }
+
+            info.addView(badgeRow);
+
+            if (w.reviewText != null && !w.reviewText.trim().isEmpty()) {
+                TextView revTxt = new TextView(this);
+                revTxt.setText("“" + w.reviewText + "”");
+                revTxt.setTextSize(12);
+                revTxt.setTextColor(Color.rgb(80, 80, 90));
+                revTxt.setMaxLines(3);
+                info.addView(revTxt);
+            }
+
+            // Quick actions
+            LinearLayout actionRow = new LinearLayout(this);
+            actionRow.setOrientation(LinearLayout.HORIZONTAL);
+            actionRow.setPadding(0, dp(4), 0, 0);
+
+            Button openBtn = new Button(this);
+            openBtn.setText("查看目录");
+            openBtn.setTextSize(12);
+            openBtn.setPadding(dp(6), dp(2), dp(6), dp(2));
+            openBtn.setOnClickListener(v -> loadAsmrDetail(w));
+            actionRow.addView(openBtn);
+
+            Button editBtn = new Button(this);
+            editBtn.setText("编辑进度");
+            editBtn.setTextSize(12);
+            editBtn.setPadding(dp(6), dp(2), dp(6), dp(2));
+            editBtn.setOnClickListener(v -> showReviewEditDialog(w));
+            actionRow.addView(editBtn);
+
+            info.addView(actionRow);
+
+            card.setOnClickListener(v -> loadAsmrDetail(w));
+        }
+
+        LinearLayout pager = new LinearLayout(this);
+        pager.setOrientation(LinearLayout.HORIZONTAL);
+        pager.setGravity(Gravity.CENTER);
+        pager.setPadding(0, dp(12), 0, dp(16));
+
+        Button prev = new Button(this);
+        prev.setText("上一页");
+        prev.setEnabled(page > 1);
+        prev.setOnClickListener(v -> loadAsmrReviewPage(page - 1));
+        pager.addView(prev);
+
+        TextView pageIndicator = new TextView(this);
+        pageIndicator.setText(" 第 " + page + " 页 ");
+        pageIndicator.setPadding(dp(12), 0, dp(12), 0);
+        pager.addView(pageIndicator);
+
+        Button next = new Button(this);
+        next.setText("下一页");
+        // Each page has up to 12 items on web
+        next.setEnabled(works.size() >= 10);
+        next.setOnClickListener(v -> loadAsmrReviewPage(page + 1));
+        pager.addView(next);
+
+        asmrContent.addView(pager);
+    }
+
+    private void showReviewEditDialog(AsmrWork work) {
+        final long numId = work.numericId > 0 ? work.numericId : (extractNumericId(work.id).isEmpty() ? 0 : Long.parseLong(extractNumericId(work.id)));
+        if (numId == 0) {
+            Toast.makeText(this, "无法获取该作品的数字 ID", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(16);
+        form.setPadding(pad, pad, pad, pad);
+
+        TextView workTitle = new TextView(this);
+        workTitle.setText(work.id + " - " + work.title);
+        workTitle.setTextSize(14);
+        workTitle.setTypeface(null, android.graphics.Typeface.BOLD);
+        workTitle.setPadding(0, 0, 0, dp(8));
+        form.addView(workTitle);
+
+        TextView progLabel = new TextView(this);
+        progLabel.setText("标记进度：");
+        form.addView(progLabel);
+
+        final String[] progKeys = { "marked", "listening", "listened", "replay", "postponed" };
+        final String[] progLabels = { "想听 (marked)", "在听 (listening)", "听过 (listened)", "重听 (replay)", "搁置 (postponed)" };
+        Spinner progSpinner = new Spinner(this);
+        ArrayAdapter<String> progAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, progLabels);
+        progSpinner.setAdapter(progAdapter);
+        if (work.progress != null) {
+            for (int i = 0; i < progKeys.length; i++) {
+                if (progKeys[i].equals(work.progress)) {
+                    progSpinner.setSelection(i);
+                    break;
+                }
+            }
+        }
+        form.addView(progSpinner);
+
+        TextView rateLabel = new TextView(this);
+        rateLabel.setText("\n评分（1-5 星，可选）：");
+        form.addView(rateLabel);
+
+        final String[] starOptions = { "无评分", "★☆☆☆☆ (1星)", "★★☆☆☆ (2星)", "★★★☆☆ (3星)", "★★★★☆ (4星)", "★★★★★ (5星)" };
+        Spinner starSpinner = new Spinner(this);
+        ArrayAdapter<String> starAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, starOptions);
+        starSpinner.setAdapter(starAdapter);
+        if (work.userRating != null && work.userRating >= 1 && work.userRating <= 5) {
+            starSpinner.setSelection(work.userRating);
+        }
+        form.addView(starSpinner);
+
+        TextView textLabel = new TextView(this);
+        textLabel.setText("\n评价内容 / 备忘：");
+        form.addView(textLabel);
+
+        EditText commentEdit = new EditText(this);
+        commentEdit.setHint("写点听后感或笔记吧…");
+        commentEdit.setMaxLines(4);
+        if (work.reviewText != null) {
+            commentEdit.setText(work.reviewText);
+        }
+        form.addView(commentEdit);
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+            .setTitle("标记 / 评价作品")
+            .setView(form)
+            .setPositiveButton("保存提交", null)
+            .setNeutralButton("删除标记", null)
+            .setNegativeButton("取消", null)
+            .create();
+
+        dialog.setOnShowListener(d -> {
+            Button saveBtn = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+            saveBtn.setOnClickListener(v -> {
+                saveBtn.setEnabled(false);
+                saveBtn.setText("提交中…");
+
+                String selectedProgress = progKeys[progSpinner.getSelectedItemPosition()];
+                int starIdx = starSpinner.getSelectedItemPosition();
+                Integer selectedRating = starIdx > 0 ? starIdx : null;
+                String selectedText = commentEdit.getText().toString();
+
+                io.execute(() -> {
+                    try {
+                        JSONObject putBody = new JSONObject();
+                        putBody.put("work_id", numId);
+                        putBody.put("progress", selectedProgress);
+                        if (selectedRating != null) putBody.put("rating", (int) selectedRating);
+                        putBody.put("review_text", selectedText);
+
+                        executeAsmrApi("PUT", "https://api.asmr-200.com/api/review", putBody.toString());
+                        work.progress = selectedProgress;
+                        work.userRating = selectedRating;
+                        work.reviewText = selectedText;
+
+                        runOnUiThread(() -> {
+                            dialog.dismiss();
+                            Toast.makeText(this, "进度已保存", Toast.LENGTH_SHORT).show();
+                            loadAsmrCurrentView();
+                        });
+                    } catch (Throwable err) {
+                        runOnUiThread(() -> {
+                            saveBtn.setEnabled(true);
+                            saveBtn.setText("保存提交");
+                            Toast.makeText(this, "提交失败: " + err.getMessage(), Toast.LENGTH_LONG).show();
+                        });
+                    }
+                });
+            });
+
+            Button delBtn = dialog.getButton(AlertDialog.BUTTON_NEUTRAL);
+            delBtn.setOnClickListener(v -> {
+                new AlertDialog.Builder(this)
+                    .setTitle("确认删除")
+                    .setMessage("确定要删除该作品的所有标记与评价吗？")
+                    .setPositiveButton("确认删除", (subD, w) -> {
+                        delBtn.setEnabled(false);
+                        io.execute(() -> {
+                            try {
+                                executeAsmrApi("DELETE", "https://api.asmr-200.com/api/review?work_id=" + numId, null);
+                                work.progress = null;
+                                work.userRating = null;
+                                work.reviewText = null;
+
+                                runOnUiThread(() -> {
+                                    dialog.dismiss();
+                                    Toast.makeText(this, "标记已删除", Toast.LENGTH_SHORT).show();
+                                    loadAsmrCurrentView();
+                                });
+                            } catch (Throwable err) {
+                                runOnUiThread(() -> {
+                                    delBtn.setEnabled(true);
+                                    Toast.makeText(this, "删除失败: " + err.getMessage(), Toast.LENGTH_LONG).show();
+                                });
+                            }
+                        });
+                    })
+                    .setNegativeButton("取消", null)
+                    .show();
+            });
+        });
+
+        dialog.show();
+    }
+
+    private void showExportPlaylistDialog() {
+        if (asmrAuthorization.isEmpty()) {
+            Toast.makeText(this, "请先登录", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        io.execute(() -> {
+            try {
+                JSONObject json = fetchAsmrJson("https://api.asmr-200.com/api/playlist/get-playlists");
+                JSONArray playlists = json.optJSONArray("playlists");
+                if (playlists == null) playlists = new JSONArray();
+
+                final java.util.ArrayList<String> ids = new java.util.ArrayList<>();
+                final java.util.ArrayList<String> names = new java.util.ArrayList<>();
+
+                for (int i = 0; i < playlists.length(); i++) {
+                    JSONObject pl = playlists.optJSONObject(i);
+                    if (pl == null) continue;
+                    String pid = pl.optString("id", "");
+                    String pname = pl.optString("name", "");
+                    if ("__SYS_PLAYLIST_MARKED".equals(pname)) pname = "我标记的";
+                    if ("__SYS_PLAYLIST_LIKED".equals(pname)) pname = "我喜欢的";
+                    ids.add(pid);
+                    names.add(pname);
+                }
+
+                runOnUiThread(() -> {
+                    if (isFinishing()) return;
+                    if (ids.isEmpty()) {
+                        Toast.makeText(this, "未找到可用歌单", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+
+                    final String[] plItems = names.toArray(new String[0]);
+                    new AlertDialog.Builder(this)
+                        .setTitle("导出当前分类作品到歌单")
+                        .setItems(plItems, (d, which) -> {
+                            String targetId = ids.get(which);
+                            String targetName = plItems[which];
+                            confirmExportToPlaylist(targetId, targetName);
+                        })
+                        .setNegativeButton("取消", null)
+                        .show();
+                });
+            } catch (Throwable e) {
+                runOnUiThread(() -> Toast.makeText(this, "获取歌单失败: " + e.getMessage(), Toast.LENGTH_LONG).show());
+            }
+        });
+    }
+
+    private void confirmExportToPlaylist(String playlistId, String playlistName) {
+        final String type = asmrMode == ASMR_MODE_PROGRESS ? asmrProgressFilter : "marked";
+        new AlertDialog.Builder(this)
+            .setTitle("确认导出")
+            .setMessage("确定将分类【" + getProgressLabel(type) + "】下的作品全部导出至歌单【" + playlistName + "】吗？")
+            .setPositiveButton("开始导出", (d, w) -> {
+                io.execute(() -> {
+                    try {
+                        JSONObject body = new JSONObject();
+                        body.put("type", type);
+                        body.put("playlistID", playlistId);
+                        executeAsmrApi("POST", "https://api.asmr-200.com/api/review/export-review-works-to-playlist", body.toString());
+                        runOnUiThread(() -> Toast.makeText(this, "已成功导出到歌单：" + playlistName, Toast.LENGTH_SHORT).show());
+                    } catch (Throwable e) {
+                        runOnUiThread(() -> Toast.makeText(this, "导出失败: " + e.getMessage(), Toast.LENGTH_LONG).show());
+                    }
+                });
+            })
+            .setNegativeButton("取消", null)
+            .show();
     }
 
     private static String extractNumericId(String id) {
@@ -1236,8 +1955,8 @@ public class MainActivity extends Activity {
                     if (isFinishing() || asmrContent == null) return;
                     asmrContent.removeAllViews();
                     Button back = new Button(this);
-                    back.setText("← 返回作品列表");
-                    back.setOnClickListener(v -> loadAsmrPage(asmrPage));
+                    back.setText("← 返回列表");
+                    back.setOnClickListener(v -> loadAsmrCurrentView());
                     asmrContent.addView(back);
 
                     TextView err = new TextView(this);
@@ -1257,10 +1976,22 @@ public class MainActivity extends Activity {
 
     private void renderAsmrDetail(AsmrWork work, java.util.ArrayList<AsmrTrackNode> nodes, int[] stats) {
         asmrContent.removeAllViews();
+
+        LinearLayout topNav = new LinearLayout(this);
+        topNav.setOrientation(LinearLayout.HORIZONTAL);
+        topNav.setGravity(Gravity.CENTER_VERTICAL);
+
         Button back = new Button(this);
-        back.setText("← 返回作品列表");
-        back.setOnClickListener(v -> loadAsmrPage(asmrPage));
-        asmrContent.addView(back);
+        back.setText("← 返回列表");
+        back.setOnClickListener(v -> loadAsmrCurrentView());
+        topNav.addView(back);
+
+        Button editRev = new Button(this);
+        editRev.setText("标记 / 评价");
+        editRev.setOnClickListener(v -> showReviewEditDialog(work));
+        topNav.addView(editRev);
+
+        asmrContent.addView(topNav);
 
         TextView title = new TextView(this);
         title.setText(work.title);
