@@ -63,10 +63,15 @@ import java.security.KeyPairGenerator;
 import java.security.KeyStore;
 import java.security.PrivateKey;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
@@ -83,6 +88,7 @@ public class MainActivity extends Activity {
     private static final String KEYSTORE = "AndroidKeyStore";
     private static final String KEY_ALIAS = "chat_runtime_config_key";
     private static final int TIMEOUT_MS = 15000;
+    private static final String ASMR_WORKS_LIST_URL = "https://api.asmr-200.com/api/works?order=create_date&sort=desc&page=1&pageSize=20&subtitle=0";
 
     private TextView statusView;
     private TextView responseView;
@@ -415,13 +421,14 @@ public class MainActivity extends Activity {
         TextView status = new TextView(this); status.setText("已保存节点：" + loadSubscriptionNodes().length() + " 个。更新成功后可点选节点。");
         status.setPadding(0, dp(6), 0, dp(6)); layout.addView(status);
         Button update = new Button(this); update.setText("更新订阅列表"); layout.addView(update);
+        Button test = new Button(this); test.setText("测试"); layout.addView(test);
         ScrollView scroll = new ScrollView(this); LinearLayout nodeList = new LinearLayout(this); nodeList.setOrientation(LinearLayout.VERTICAL);
         scroll.addView(nodeList); layout.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1f));
         AlertDialog dialog = new AlertDialog.Builder(this).setTitle("代理订阅").setView(layout).setNegativeButton("关闭", null).create();
         update.setOnClickListener(v -> {
             String subscriptionUrl = urlInput.getText().toString().trim();
             if (!(subscriptionUrl.startsWith("https://") || subscriptionUrl.startsWith("http://"))) { status.setText("请输入有效的 http:// 或 https:// 订阅地址"); return; }
-            update.setEnabled(false); update.setText("正在更新…"); status.setText("正在下载并解析订阅列表…");
+            update.setEnabled(false); update.setText("正在更新…"); test.setEnabled(false); status.setText("正在下载并解析订阅列表…");
             io.execute(() -> {
                 try {
                     JSONArray parsed = SubscriptionHelper.download(subscriptionUrl, TIMEOUT_MS);
@@ -436,7 +443,7 @@ public class MainActivity extends Activity {
                     applySelectedSubscriptionNode(selected, null);
                     runOnUiThread(() -> {
                         if (isFinishing()) return;
-                        update.setEnabled(true); update.setText("更新订阅列表");
+                        update.setEnabled(true); update.setText("更新订阅列表"); test.setEnabled(true);
                         status.setText("更新成功：" + parsed.length() + " 个节点；已应用 " + selectedNodeName(parsed, selected));
                         renderSubscriptionNodes(nodeList, status);
                     });
@@ -444,12 +451,35 @@ public class MainActivity extends Activity {
                     Log.w(TAG, "Subscription update failed", e);
                     runOnUiThread(() -> {
                         if (!isFinishing()) {
-                            update.setEnabled(true); update.setText("重试更新");
+                            update.setEnabled(true); update.setText("重试更新"); test.setEnabled(true);
                             status.setText("更新失败：" + e.getClass().getSimpleName() + "：" + (e.getMessage() == null ? "未知错误" : e.getMessage()));
                         }
                     });
                 }
             });
+        });
+        test.setOnClickListener(v -> {
+            JSONArray nodes = loadSubscriptionNodes();
+            if (nodes.length() == 0) {
+                status.setText("尚无订阅节点。粘贴订阅地址后点击“更新订阅列表”。");
+                return;
+            }
+            List<JSONObject> targets = new ArrayList<>();
+            for (int i = 0; i < nodes.length(); i++) {
+                JSONObject n = nodes.optJSONObject(i);
+                if (n != null && isTargetNode(n)) {
+                    targets.add(n);
+                }
+            }
+            if (targets.isEmpty()) {
+                status.setText("未在订阅列表中找到标题包含“台湾/日本/韩国”的节点");
+                return;
+            }
+            test.setEnabled(false);
+            test.setText("正在测试…");
+            update.setEnabled(false);
+            status.setText("准备测试 " + targets.size() + " 个节点（台湾/日本/韩国）的列表接口响应速度…");
+            io.execute(() -> runSubscriptionSpeedTest(targets, update, test, nodeList, status));
         });
         renderSubscriptionNodes(nodeList, status);
         dialog.show();
@@ -475,7 +505,12 @@ public class MainActivity extends Activity {
         for (int i = 0; i < nodes.length(); i++) {
             JSONObject node = nodes.optJSONObject(i); if (node == null) continue;
             int id = node.optInt("id", i + 1); Button item = new Button(this); item.setAllCaps(false);
-            item.setText((id == selected ? "✓ " : "") + node.optString("name", "节点 " + id) + "\n" +
+            String delayText = "";
+            if (node.optBoolean("tested", false)) {
+                long d = node.optLong("delay", -1);
+                delayText = d >= 0 ? " · " + d + " ms" : " · 失败/超时";
+            }
+            item.setText((id == selected ? "✓ " : "") + node.optString("name", "节点 " + id) + delayText + "\n" +
                 node.optString("protocol", "").toUpperCase(Locale.ROOT) + " · " + node.optString("address", "") + ":" + node.optInt("port"));
             item.setOnClickListener(v -> {
                 prefs.edit().putInt("subscription_selected_id", id).apply();
@@ -509,26 +544,183 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static boolean isTargetNode(JSONObject node) {
+        if (node == null) return false;
+        String name = node.optString("name", "");
+        if (name.isEmpty()) return false;
+        if (name.contains("台湾") || name.contains("台灣")
+                || name.contains("日本")
+                || name.contains("韩国") || name.contains("韓國")) {
+            return true;
+        }
+        if (name.contains("🇹🇼") || name.contains("🇯🇵") || name.contains("🇰🇷")) {
+            return true;
+        }
+        String lower = name.toLowerCase(Locale.ROOT);
+        if (lower.contains("taiwan") || lower.contains("japan") || lower.contains("korea")) {
+            return true;
+        }
+        return lower.matches(".*(?:^|[^a-z])(tw|jp|kr)(?:[^a-z]|$).*");
+    }
+
+    private JSONObject buildConfigForNode(JSONObject node, String baseConfigJson) throws Exception {
+        JSONObject root = new JSONObject(baseConfigJson != null ? baseConfigJson : readAsset("config.json"));
+        JSONObject outbound = SubscriptionHelper.outbound(node);
+        outbound.put("tag", "proxy");
+        JSONArray oldOutbounds = root.optJSONArray("outbounds");
+        JSONArray replacement = new JSONArray().put(outbound);
+        if (oldOutbounds != null) {
+            for (int i = 0; i < oldOutbounds.length(); i++) {
+                JSONObject old = oldOutbounds.optJSONObject(i);
+                if (old != null && "direct".equals(old.optString("tag"))) {
+                    replacement.put(old);
+                }
+            }
+        }
+        if (replacement.length() == 1) {
+            replacement.put(new JSONObject().put("tag", "direct").put("protocol", "freedom"));
+        }
+        root.put("outbounds", replacement);
+        JSONObject log = root.optJSONObject("log");
+        if (log == null) {
+            log = new JSONObject();
+            root.put("log", log);
+        }
+        log.put("loglevel", "warning");
+        log.remove("access");
+        log.remove("error");
+        return root;
+    }
+
     private JSONObject configWithSelectedNode(int id) throws Exception {
-        JSONObject root = new JSONObject(readAsset("config.json"));
-        JSONArray nodes = loadSubscriptionNodes(); JSONObject selected = null;
+        JSONArray nodes = loadSubscriptionNodes();
+        JSONObject selected = null;
         for (int i = 0; i < nodes.length(); i++) {
             JSONObject candidate = nodes.optJSONObject(i);
-            if (candidate != null && candidate.optInt("id") == id) { selected = candidate; break; }
+            if (candidate != null && candidate.optInt("id") == id) {
+                selected = candidate;
+                break;
+            }
         }
         if (selected == null) throw new java.io.IOException("找不到已选择的订阅节点");
-        JSONObject outbound = SubscriptionHelper.outbound(selected); outbound.put("tag", "proxy");
-        JSONArray oldOutbounds = root.optJSONArray("outbounds"); JSONArray replacement = new JSONArray().put(outbound);
-        if (oldOutbounds != null) for (int i = 0; i < oldOutbounds.length(); i++) {
-            JSONObject old = oldOutbounds.optJSONObject(i);
-            if (old != null && "direct".equals(old.optString("tag"))) replacement.put(old);
+        JSONObject root = buildConfigForNode(selected, null);
+        JSONObject log = root.optJSONObject("log");
+        if (log == null) {
+            log = new JSONObject();
+            root.put("log", log);
         }
-        if (replacement.length() == 1) replacement.put(new JSONObject().put("tag", "direct").put("protocol", "freedom"));
-        root.put("outbounds", replacement);
-        JSONObject log = root.optJSONObject("log"); if (log == null) { log = new JSONObject(); root.put("log", log); }
-        log.put("loglevel", "debug").put("access", new java.io.File(getFilesDir(), "access.log").getAbsolutePath())
-            .put("error", new java.io.File(getFilesDir(), "error.log").getAbsolutePath());
+        log.put("loglevel", "debug")
+           .put("access", new java.io.File(getFilesDir(), "access.log").getAbsolutePath())
+           .put("error", new java.io.File(getFilesDir(), "error.log").getAbsolutePath());
         return root;
+    }
+
+    private void runSubscriptionSpeedTest(List<JSONObject> targets, Button update, Button test, LinearLayout nodeList, TextView status) {
+        String baseConfig;
+        try {
+            baseConfig = readAsset("config.json");
+        } catch (Throwable e) {
+            baseConfig = null;
+        }
+
+        int total = targets.size();
+        AtomicInteger completed = new AtomicInteger(0);
+        ConcurrentHashMap<Integer, Long> delays = new ConcurrentHashMap<>();
+        int poolSize = Math.max(1, Math.min(3, total));
+        ExecutorService pool = Executors.newFixedThreadPool(poolSize);
+
+        for (JSONObject target : targets) {
+            final int id = target.optInt("id");
+            final JSONObject node = target;
+            final String template = baseConfig;
+            pool.execute(() -> {
+                long delay = -1;
+                try {
+                    JSONObject config = buildConfigForNode(node, template);
+                    delay = Libv2ray.measureOutboundDelay(config.toString(), ASMR_WORKS_LIST_URL);
+                } catch (Throwable t) {
+                    Log.w(TAG, "Speed test error for node " + node.optString("name"), t);
+                    delay = -1;
+                }
+                delays.put(id, delay);
+                int done = completed.incrementAndGet();
+                runOnUiThread(() -> {
+                    if (!isFinishing()) {
+                        status.setText("正在测试节点响应速度 (" + done + "/" + total + ")…");
+                    }
+                });
+            });
+        }
+
+        pool.shutdown();
+        try {
+            pool.awaitTermination(90, TimeUnit.SECONDS);
+        } catch (InterruptedException ignored) {}
+
+        JSONArray currentNodes = loadSubscriptionNodes();
+        List<JSONObject> allList = new ArrayList<>();
+        for (int i = 0; i < currentNodes.length(); i++) {
+            JSONObject n = currentNodes.optJSONObject(i);
+            if (n != null) allList.add(n);
+        }
+
+        JSONObject fastest = null;
+        long fastestDelay = Long.MAX_VALUE;
+
+        for (JSONObject n : allList) {
+            int id = n.optInt("id");
+            if (delays.containsKey(id)) {
+                long d = delays.get(id);
+                try {
+                    n.put("tested", true);
+                    n.put("delay", d);
+                } catch (Exception ignored) {}
+                if (d >= 0 && d < fastestDelay) {
+                    fastestDelay = d;
+                    fastest = n;
+                }
+            }
+        }
+
+        Collections.sort(allList, (a, b) -> {
+            boolean aTested = a.optBoolean("tested", false);
+            boolean bTested = b.optBoolean("tested", false);
+            long aDelay = a.optLong("delay", -1);
+            long bDelay = b.optLong("delay", -1);
+
+            int aGroup = (!aTested) ? 3 : (aDelay >= 0 ? 1 : 2);
+            int bGroup = (!bTested) ? 3 : (bDelay >= 0 ? 1 : 2);
+
+            if (aGroup != bGroup) {
+                return Integer.compare(aGroup, bGroup);
+            }
+            if (aGroup == 1) {
+                return Long.compare(aDelay, bDelay);
+            }
+            return Integer.compare(a.optInt("id", 0), b.optInt("id", 0));
+        });
+
+        JSONArray sortedArray = new JSONArray();
+        for (JSONObject n : allList) {
+            sortedArray.put(n);
+        }
+        prefs.edit().putString("subscription_nodes", sortedArray.toString()).apply();
+
+        final JSONObject finalFastest = fastest;
+        final long finalFastestDelay = fastestDelay;
+        runOnUiThread(() -> {
+            if (isFinishing()) return;
+            update.setEnabled(true);
+            test.setEnabled(true);
+            test.setText("测试");
+            renderSubscriptionNodes(nodeList, status);
+            if (finalFastest != null) {
+                status.setText("测试完成：共测试 " + total + " 个节点；最快：" +
+                        finalFastest.optString("name", "节点") + " (" + finalFastestDelay + " ms)");
+            } else {
+                status.setText("测试完成：共测试 " + total + " 个节点，全部响应超时或失败");
+            }
+        });
     }
 
     private JSONObject configWithSavedSubscriptionIfAny() throws Exception {
@@ -822,7 +1014,7 @@ public class MainActivity extends Activity {
         io.execute(() -> {
             long started = android.os.SystemClock.elapsedRealtime();
             try {
-                String url = "https://api.asmr-200.com/api/works?order=create_date&sort=desc&page=" + requestedPage + "&pageSize=20&subtitle=0";
+                String url = requestedPage == 1 ? ASMR_WORKS_LIST_URL : ("https://api.asmr-200.com/api/works?order=create_date&sort=desc&page=" + requestedPage + "&pageSize=20&subtitle=0");
                 JSONObject json = fetchAsmrJson(url);
                 java.util.ArrayList<AsmrWork> parsed = parseAsmrWorksJson(json);
                 asmrLog("I", "works API loaded page=" + requestedPage + " count=" + parsed.size() + " elapsedMs=" + (android.os.SystemClock.elapsedRealtime()-started), null);
