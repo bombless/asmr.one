@@ -1,4 +1,4 @@
-package com.example.xraylocal;
+package one.asmr;
 
 import java.io.Serializable;
 

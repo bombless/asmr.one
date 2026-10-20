@@ -1,4 +1,4 @@
-package com.example.xraylocal;
+package one.asmr;
 
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -37,8 +37,8 @@ public class FloatingSubtitleService extends Service {
     private static final String CHANNEL_ID = "asmr_floating_subtitle_channel";
     private static final int NOTIFICATION_ID = 2001;
 
-    public static final String ACTION_TOGGLE_PLAY = "com.example.xraylocal.ACTION_TOGGLE_PLAY";
-    public static final String ACTION_CLOSE = "com.example.xraylocal.ACTION_CLOSE";
+    public static final String ACTION_TOGGLE_PLAY = "one.asmr.ACTION_TOGGLE_PLAY";
+    public static final String ACTION_CLOSE = "one.asmr.ACTION_CLOSE";
 
     public interface FloatingControlListener {
         void onFloatingTogglePlay();

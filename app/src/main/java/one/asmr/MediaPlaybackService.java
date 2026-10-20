@@ -1,4 +1,4 @@
-package com.example.xraylocal;
+package one.asmr;
 
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -43,14 +43,14 @@ public class MediaPlaybackService extends Service {
     public static final String CHANNEL_ID = "asmr_media_channel";
     public static final int NOTIFICATION_ID = 2002;
 
-    public static final String ACTION_PLAY = "com.example.xraylocal.media.PLAY";
-    public static final String ACTION_PAUSE = "com.example.xraylocal.media.PAUSE";
-    public static final String ACTION_PLAY_PAUSE = "com.example.xraylocal.media.PLAY_PAUSE";
-    public static final String ACTION_NEXT = "com.example.xraylocal.media.NEXT";
-    public static final String ACTION_PREV = "com.example.xraylocal.media.PREV";
-    public static final String ACTION_FAST_FORWARD = "com.example.xraylocal.media.FAST_FORWARD";
-    public static final String ACTION_REWIND = "com.example.xraylocal.media.REWIND";
-    public static final String ACTION_STOP = "com.example.xraylocal.media.STOP";
+    public static final String ACTION_PLAY = "one.asmr.media.PLAY";
+    public static final String ACTION_PAUSE = "one.asmr.media.PAUSE";
+    public static final String ACTION_PLAY_PAUSE = "one.asmr.media.PLAY_PAUSE";
+    public static final String ACTION_NEXT = "one.asmr.media.NEXT";
+    public static final String ACTION_PREV = "one.asmr.media.PREV";
+    public static final String ACTION_FAST_FORWARD = "one.asmr.media.FAST_FORWARD";
+    public static final String ACTION_REWIND = "one.asmr.media.REWIND";
+    public static final String ACTION_STOP = "one.asmr.media.STOP";
 
     public interface PlayerListener {
         void onTrackChanged(MediaTrack track, int index, int totalCount);

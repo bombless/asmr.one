@@ -3,11 +3,11 @@ plugins {
 }
 
 android {
-    namespace = "com.example.xraylocal"
+    namespace = "one.asmr"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.example.xraylocal"
+        applicationId = "one.asmr"
         minSdk = 26
         targetSdk = 35
         versionCode = 1
