@@ -25,6 +25,7 @@ import libv2ray.CoreController;
 import libv2ray.Libv2ray;
 import libv2ray.XrayConnection;
 
+import java.io.BufferedInputStream;
 import java.io.BufferedReader;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -83,6 +84,7 @@ public class MainActivity extends Activity {
     private final ArrayDeque<String> transferDebugLog = new ArrayDeque<>();
     private boolean asmrUseXray = true;
     private volatile String asmrAuthorization = "";
+    private volatile String asmrUsername = "";
 
     private final CoreCallbackHandler callback = new CoreCallbackHandler() {
         @Override public long startup() { coreStarted = true; return 0L; }
@@ -129,6 +131,11 @@ public class MainActivity extends Activity {
         root.addView(responseScroll, responseParams);
 
         asmrUseXray = prefs.getBoolean("asmr_use_xray", true);
+        String savedToken = prefs.getString("asmr_token", "");
+        if (!savedToken.isEmpty()) {
+            asmrAuthorization = "Bearer " + savedToken;
+            asmrUsername = prefs.getString("asmr_username", "");
+        }
         Button asmrButton = new Button(this);
         asmrButton.setText("打开 ASMR 浏览器");
         asmrButton.setOnClickListener(v -> showAsmrBrowser());
@@ -161,7 +168,7 @@ public class MainActivity extends Activity {
         Button back = new Button(this); back.setText("返回"); back.setOnClickListener(v -> showHomeScreenSafe()); bar.addView(back);
         Button settings = new Button(this); settings.setText("代理设置"); settings.setOnClickListener(v -> showAsmrSettings()); bar.addView(settings);
         Button refresh = new Button(this); refresh.setText("刷新"); refresh.setOnClickListener(v -> loadAsmrPage(asmrPage)); bar.addView(refresh);
-        Button login = new Button(this); login.setText(asmrAuthorization.isEmpty() ? "登录" : "已登录"); login.setOnClickListener(v -> showAsmrLogin()); bar.addView(login);
+        Button login = new Button(this); login.setText(asmrAuthorization.isEmpty() ? "登录" : (asmrUsername.isEmpty() ? "已登录" : asmrUsername)); login.setOnClickListener(v -> showAsmrLogin()); bar.addView(login);
         Button diag = new Button(this); diag.setText("诊断日志"); diag.setOnClickListener(v -> showAsmrDiagnostics()); bar.addView(diag);
         root.addView(bar);
         statusView = new TextView(this);
@@ -334,14 +341,34 @@ public class MainActivity extends Activity {
     }
 
     private void showAsmrLogin() {
+        if (!asmrAuthorization.isEmpty()) {
+            new AlertDialog.Builder(this)
+                .setTitle("ASMR 账号状态")
+                .setMessage("当前已登录账号：" + (asmrUsername.isEmpty() ? "已登录" : asmrUsername) + "\n\n点击“退出登录”可清除凭证；点击“切换账号”可输入新凭证。")
+                .setPositiveButton("切换账号", (d, w) -> showAsmrLoginForm())
+                .setNeutralButton("退出登录", (d, w) -> {
+                    asmrAuthorization = "";
+                    asmrUsername = "";
+                    prefs.edit().remove("asmr_token").remove("asmr_username").apply();
+                    Toast.makeText(this, "已退出登录", Toast.LENGTH_SHORT).show();
+                    showAsmrBrowser();
+                })
+                .setNegativeButton("取消", null)
+                .show();
+            return;
+        }
+        showAsmrLoginForm();
+    }
+
+    private void showAsmrLoginForm() {
         LinearLayout form = new LinearLayout(this);
         form.setOrientation(LinearLayout.VERTICAL);
         int pad = dp(16); form.setPadding(pad, pad, pad, pad);
-        EditText username = new EditText(this); username.setSingleLine(true); username.setHint("ASMR 用户名"); username.setInputType(android.text.InputType.TYPE_CLASS_TEXT);
+        EditText username = new EditText(this); username.setSingleLine(true); username.setHint("ASMR 用户名 / 邮箱"); username.setInputType(android.text.InputType.TYPE_CLASS_TEXT);
         EditText password = new EditText(this); password.setSingleLine(true); password.setHint("密码"); password.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
         form.addView(username); form.addView(password);
         AlertDialog dialog = new AlertDialog.Builder(this).setTitle("ASMR 账号登录")
-            .setMessage("使用站点原生 API 提交账号密码，不打开 WebView；凭证仅用于本次运行。")
+            .setMessage("使用站点原生 API 提交账号密码，不打开 WebView；凭证保存在本地以保持登录。")
             .setView(form).setNegativeButton("取消", null).setPositiveButton("登录", null).create();
         dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
             String name = username.getText().toString().trim(); String pass = password.getText().toString();
@@ -354,19 +381,34 @@ public class MainActivity extends Activity {
             io.execute(() -> {
                 try {
                     JSONObject result = postAsmrLogin(name, pass);
-                    JSONObject data = result.optJSONObject("data");
-                    String token = data == null ? "" : data.optString("token", "");
-                    boolean userPresent = data != null && data.optJSONObject("user") != null;
-                    asmrLog("I", "ASMR login JSON parsed; dataPresent=" + (data != null) + " tokenPresent=" + !token.isEmpty() + " userPresent=" + userPresent, null);
-                    if (token.isEmpty()) throw new java.io.IOException("登录响应未包含 data.token");
+                    String token = result.optString("token", "");
+                    JSONObject userObj = result.optJSONObject("user");
+                    if (token.isEmpty()) {
+                        JSONObject data = result.optJSONObject("data");
+                        if (data != null) {
+                            token = data.optString("token", "");
+                            if (userObj == null) userObj = data.optJSONObject("user");
+                        }
+                    }
+                    String userRet = (userObj != null) ? userObj.optString("name", name) : name;
+                    asmrLog("I", "ASMR login JSON parsed; tokenPresent=" + !token.isEmpty() + " username=" + userRet, null);
+                    if (token.isEmpty()) throw new java.io.IOException("登录响应未包含 token");
                     asmrAuthorization = "Bearer " + token;
-                    asmrLog("I", "ASMR LOGIN SUCCESS; bearer token stored in memory (token value omitted)", null);
-                    runOnUiThread(() -> { if (!isFinishing()) { dialog.dismiss(); Toast.makeText(this, "ASMR 登录成功", Toast.LENGTH_SHORT).show(); showAsmrBrowser(); } });
+                    asmrUsername = userRet;
+                    prefs.edit()
+                        .putString("asmr_token", token)
+                        .putString("asmr_username", userRet)
+                        .apply();
+                    asmrLog("I", "ASMR LOGIN SUCCESS; bearer token stored in memory & prefs", null);
+                    runOnUiThread(() -> { if (!isFinishing()) { dialog.dismiss(); Toast.makeText(this, "ASMR 登录成功（" + userRet + "）", Toast.LENGTH_SHORT).show(); showAsmrBrowser(); } });
                 } catch (Throwable e) {
                     asmrLog("W", "ASMR LOGIN FAILED; type=" + e.getClass().getSimpleName() + " message=" + (e.getMessage() == null ? "(none)" : e.getMessage()), e);
                     runOnUiThread(() -> { if (!isFinishing()) {
                         Button retry = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
-                        retry.setText("重试登录"); retry.setEnabled(true);
+                        if (retry != null) {
+                            retry.setText("重试登录");
+                            retry.setEnabled(true);
+                        }
                         String reason = e instanceof java.net.SocketTimeoutException
                             ? "连接 ASMR 服务器超时。当前线路=" + (asmrUseXray ? "Xray" : "直连") + "；请检查 Xray 节点/网络，或切换线路后重试。"
                             : "登录失败：" + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
@@ -410,6 +452,41 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static String extractErrorMessage(String body, int code) {
+        if (body != null && !body.trim().isEmpty()) {
+            try {
+                JSONObject obj = new JSONObject(body);
+                if (obj.has("error")) {
+                    String err = obj.optString("error", "").trim();
+                    if (!err.isEmpty()) return err;
+                }
+                if (obj.has("message")) {
+                    String msg = obj.optString("message", "").trim();
+                    if (!msg.isEmpty()) return msg;
+                }
+                if (obj.has("errors")) {
+                    org.json.JSONArray arr = obj.optJSONArray("errors");
+                    if (arr != null && arr.length() > 0) {
+                        StringBuilder sb = new StringBuilder();
+                        for (int i = 0; i < arr.length(); i++) {
+                            JSONObject item = arr.optJSONObject(i);
+                            if (item != null) {
+                                String m = item.optString("msg", "").trim();
+                                if (!m.isEmpty()) {
+                                    if (sb.length() > 0) sb.append("; ");
+                                    sb.append(m);
+                                }
+                            }
+                        }
+                        if (sb.length() > 0) return sb.toString();
+                    }
+                }
+            } catch (Throwable ignored) { }
+            return "HTTP " + code + ": " + (body.length() > 200 ? body.substring(0, 200) + "…" : body);
+        }
+        return "HTTP " + code;
+    }
+
     private JSONObject postAsmrLogin(String username, String password) throws Exception {
         HttpsURLConnection c = null;
         long started = android.os.SystemClock.elapsedRealtime();
@@ -418,6 +495,7 @@ public class MainActivity extends Activity {
             logDnsResolutionAsync("api.asmr-200.com", asmrUseXray ? "Xray" : "direct");
             c = openHttpsConnection("https://api.asmr-200.com/api/auth/me", asmrUseXray);
             c.setConnectTimeout(TIMEOUT_MS); c.setReadTimeout(30000); c.setRequestMethod("POST"); c.setDoOutput(true);
+            c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/130 Mobile Safari/537.36");
             c.setRequestProperty("Content-Type", "application/json"); c.setRequestProperty("Accept", "application/json");
             c.setRequestProperty("Origin", "https://asmr.one"); c.setRequestProperty("Referer", "https://asmr.one/");
             JSONObject payload = new JSONObject(); payload.put("name", username); payload.put("password", password);
@@ -427,7 +505,10 @@ public class MainActivity extends Activity {
             StringBuilder body = new StringBuilder();
             if (in != null) try (BufferedReader br = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) { char[] buf = new char[4096]; int n; while ((n = br.read(buf)) != -1 && body.length() < 1024 * 1024) body.append(buf, 0, Math.min(n, 1024 * 1024 - body.length())); }
             asmrLog("I", "ASMR login HTTP response status=" + code + " responseChars=" + body.length() + " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - started), null);
-            if (code < 200 || code >= 300) throw new java.io.IOException("API HTTP " + code + ": " + body.substring(0, Math.min(240, body.length())));
+            if (code < 200 || code >= 300) {
+                String errorMsg = extractErrorMessage(body.toString(), code);
+                throw new java.io.IOException(errorMsg);
+            }
             return new JSONObject(body.toString());
         } finally { if (c != null) c.disconnect(); }
     }
@@ -446,7 +527,14 @@ public class MainActivity extends Activity {
             int code=c.getResponseCode();InputStream in=code>=400?c.getErrorStream():c.getInputStream();StringBuilder body=new StringBuilder();
             if(in!=null)try(BufferedReader br=new BufferedReader(new InputStreamReader(in,StandardCharsets.UTF_8))){char[] buf=new char[8192];int n,total=0;while((n=br.read(buf))!=-1&&total<4*1024*1024){int keep=Math.min(n,4*1024*1024-total);body.append(buf,0,keep);total+=keep;}}
             asmrLog("I","API response status="+code+" type="+c.getContentType()+" chars="+body.length()+" elapsedMs="+(android.os.SystemClock.elapsedRealtime()-started),null);
-            if(code<200||code>=300)throw new java.io.IOException("API HTTP "+code+" body="+body.substring(0,Math.min(300,body.length())));
+            if(code<200||code>=300) {
+                if (code == 401 && !asmrAuthorization.isEmpty()) {
+                    asmrAuthorization = "";
+                    asmrUsername = "";
+                    prefs.edit().remove("asmr_token").remove("asmr_username").apply();
+                }
+                throw new java.io.IOException("API HTTP "+code+" body="+body.substring(0,Math.min(300,body.length())));
+            }
             return new JSONObject(body.toString());
         }catch(Throwable e){asmrLog("E","works API request failed",e);if(e instanceof Exception)throw (Exception)e;throw new java.io.IOException(e);}finally{if(c!=null)c.disconnect();}
     }
@@ -963,7 +1051,7 @@ public class MainActivity extends Activity {
                     headerBuilder.append("Host: ").append(url.getHost()).append("\r\n");
                 }
                 if (getRequestProperty("User-Agent") == null) {
-                    headerBuilder.append("User-Agent: XrayLocal/1.0\r\n");
+                    headerBuilder.append("User-Agent: Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/130 Mobile Safari/537.36\r\n");
                 }
                 if (getRequestProperty("Accept-Encoding") == null) {
                     headerBuilder.append("Accept-Encoding: identity\r\n");
@@ -996,16 +1084,27 @@ public class MainActivity extends Activity {
             }
         }
 
-        private void parseResponse(InputStream in) throws java.io.IOException {
-            BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.ISO_8859_1));
-            String status = reader.readLine();
+        private static String readAsciiLine(InputStream in) throws java.io.IOException {
+            java.io.ByteArrayOutputStream line = new java.io.ByteArrayOutputStream();
+            int b;
+            while ((b = in.read()) != -1) {
+                if (b == '\n') break;
+                if (b != '\r') line.write(b);
+            }
+            if (b == -1 && line.size() == 0) return null;
+            return line.toString(StandardCharsets.ISO_8859_1.name());
+        }
+
+        private void parseResponse(InputStream rawIn) throws java.io.IOException {
+            BufferedInputStream in = new BufferedInputStream(rawIn, 8192);
+            String status = readAsciiLine(in);
             if (status == null) throw new java.io.EOFException("empty HTTP response");
             String[] parts = status.split(" ", 3);
             if (parts.length < 2) throw new java.io.IOException("bad HTTP status: " + status);
             responseCode = Integer.parseInt(parts[1]);
             responseMessage = parts.length >= 3 ? parts[2] : "";
             String line;
-            while ((line = reader.readLine()) != null && line.length() != 0) {
+            while ((line = readAsciiLine(in)) != null && !line.isEmpty()) {
                 int colon = line.indexOf(':');
                 if (colon > 0) responseHeaders.put(line.substring(0, colon).trim(), line.substring(colon + 1).trim());
             }
@@ -1015,29 +1114,67 @@ public class MainActivity extends Activity {
             final int MAX_BODY = 10 * 1024 * 1024;
             if (transfer != null && transfer.toLowerCase(java.util.Locale.US).contains("chunked")) {
                 while (true) {
-                    String sizeLine = reader.readLine();
+                    String sizeLine = readAsciiLine(in);
                     if (sizeLine == null) break;
+                    sizeLine = sizeLine.trim();
+                    if (sizeLine.isEmpty()) continue;
                     int semi = sizeLine.indexOf(';');
-                    if (semi >= 0) sizeLine = sizeLine.substring(0, semi);
-                    int size = Integer.parseInt(sizeLine.trim(), 16);
-                    if (size == 0) { while ((line = reader.readLine()) != null && line.length() != 0) {} break; }
-                    byte[] chunk = new byte[size];
-                    int off = 0;
-                    while (off < size) { int b = reader.read(); if (b < 0) throw new java.io.EOFException(); chunk[off++] = (byte)b; }
-                    data.write(chunk);
-                    reader.readLine();
+                    if (semi >= 0) sizeLine = sizeLine.substring(0, semi).trim();
+                    int size = Integer.parseInt(sizeLine, 16);
+                    if (size == 0) {
+                        while (true) {
+                            String trail = readAsciiLine(in);
+                            if (trail == null || trail.isEmpty()) break;
+                        }
+                        break;
+                    }
+                    int rem = size;
+                    byte[] buf = new byte[Math.min(4096, rem)];
+                    while (rem > 0) {
+                        int n = in.read(buf, 0, Math.min(buf.length, rem));
+                        if (n < 0) throw new java.io.EOFException("premature EOF reading chunk data");
+                        if (data.size() < MAX_BODY) {
+                            data.write(buf, 0, Math.min(n, MAX_BODY - data.size()));
+                        }
+                        rem -= n;
+                    }
+                    readAsciiLine(in);
                     if (data.size() >= MAX_BODY) break;
                 }
             } else if (length != null) {
-                long wanted = Long.parseLong(length);
+                long wanted = Long.parseLong(length.trim());
                 long remaining = Math.min(wanted, (long) MAX_BODY);
                 byte[] buf = new byte[4096];
-                while (remaining > 0) { int n = in.read(buf, 0, (int)Math.min(buf.length, remaining)); if (n < 0) break; data.write(buf, 0, n); remaining -= n; }
+                while (remaining > 0) {
+                    int n = in.read(buf, 0, (int) Math.min(buf.length, remaining));
+                    if (n < 0) break;
+                    data.write(buf, 0, n);
+                    remaining -= n;
+                }
             } else {
                 byte[] buf = new byte[4096];
-                int n; while (data.size() < MAX_BODY && (n = in.read(buf, 0, Math.min(buf.length, MAX_BODY - data.size()))) != -1) data.write(buf, 0, n);
+                int n;
+                while (data.size() < MAX_BODY && (n = in.read(buf, 0, Math.min(buf.length, MAX_BODY - data.size()))) != -1) {
+                    data.write(buf, 0, n);
+                }
             }
-            body = data.toByteArray();
+            byte[] rawBytes = data.toByteArray();
+            String contentEncoding = getHeader("Content-Encoding");
+            if (contentEncoding != null && contentEncoding.toLowerCase(java.util.Locale.US).contains("gzip")) {
+                try (java.util.zip.GZIPInputStream gzin = new java.util.zip.GZIPInputStream(new java.io.ByteArrayInputStream(rawBytes));
+                     java.io.ByteArrayOutputStream decompressed = new java.io.ByteArrayOutputStream()) {
+                    byte[] gbuf = new byte[4096];
+                    int gn;
+                    while ((gn = gzin.read(gbuf)) != -1) {
+                        decompressed.write(gbuf, 0, gn);
+                    }
+                    body = decompressed.toByteArray();
+                } catch (Throwable e) {
+                    body = rawBytes;
+                }
+            } else {
+                body = rawBytes;
+            }
         }
 
         private String getHeader(String name) {
