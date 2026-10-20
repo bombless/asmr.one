@@ -8,22 +8,18 @@ import android.content.SharedPreferences;
 import android.net.Uri;
 import android.util.Base64;
 import android.util.Log;
-import android.webkit.JavascriptInterface;
-import android.webkit.WebChromeClient;
-import android.webkit.ConsoleMessage;
-import android.webkit.WebSettings;
-import android.webkit.WebView;
-import android.webkit.WebViewClient;
 import android.widget.Toast;
 import android.widget.EditText;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import android.widget.ImageView;
 import android.widget.ScrollView;
 import android.view.ViewGroup;
 import android.view.Gravity;
 
 import org.json.JSONObject;
+import org.json.JSONArray;
 import libv2ray.CoreCallbackHandler;
 import libv2ray.CoreController;
 import libv2ray.Libv2ray;
@@ -53,6 +49,7 @@ import java.security.KeyPairGenerator;
 import java.security.KeyStore;
 import java.security.PrivateKey;
 import java.util.ArrayDeque;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -73,7 +70,6 @@ public class MainActivity extends Activity {
     private static final String KEY_ALIAS = "chat_runtime_config_key";
     private static final int TIMEOUT_MS = 15000;
 
-    private WebView web;
     private TextView statusView;
     private TextView responseView;
     private Button googleButton;
@@ -85,6 +81,8 @@ public class MainActivity extends Activity {
     private String transferToken;
     private AlertDialog pairingDialog;
     private final ArrayDeque<String> transferDebugLog = new ArrayDeque<>();
+    private boolean asmrUseXray = true;
+    private volatile String asmrAuthorization = "";
 
     private final CoreCallbackHandler callback = new CoreCallbackHandler() {
         @Override public long startup() { coreStarted = true; return 0L; }
@@ -130,10 +128,507 @@ public class MainActivity extends Activity {
         responseParams.topMargin = dp(12);
         root.addView(responseScroll, responseParams);
 
+        asmrUseXray = prefs.getBoolean("asmr_use_xray", true);
+        Button asmrButton = new Button(this);
+        asmrButton.setText("打开 ASMR 浏览器");
+        asmrButton.setOnClickListener(v -> showAsmrBrowser());
+        root.addView(asmrButton, 0, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        Button subscriptionsButton = new Button(this);
+        subscriptionsButton.setText("代理订阅 / 更新节点");
+        subscriptionsButton.setOnClickListener(v -> showSubscriptionManager());
+        root.addView(subscriptionsButton, 1, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         setContentView(root);
         io.execute(this::startXray);
     }
 
+    private final java.util.ArrayList<AsmrWork> asmrWorks = new java.util.ArrayList<>();
+    private int asmrPage = 2;
+    private LinearLayout asmrContent;
+    private ScrollView asmrScroll;
+
+    private static final class AsmrWork {
+        String id, title, cover, date, circle, url;
+        AsmrWork(String id, String title, String cover, String date, String circle, String url) {
+            this.id=id; this.title=title; this.cover=cover; this.date=date; this.circle=circle; this.url=url;
+        }
+    }
+
+    private void showAsmrBrowser() {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(dp(12), dp(8), dp(12), dp(8));
+        LinearLayout bar = new LinearLayout(this);
+        Button back = new Button(this); back.setText("返回"); back.setOnClickListener(v -> showHomeScreenSafe()); bar.addView(back);
+        Button settings = new Button(this); settings.setText("代理设置"); settings.setOnClickListener(v -> showAsmrSettings()); bar.addView(settings);
+        Button refresh = new Button(this); refresh.setText("刷新"); refresh.setOnClickListener(v -> loadAsmrPage(asmrPage)); bar.addView(refresh);
+        Button login = new Button(this); login.setText(asmrAuthorization.isEmpty() ? "登录" : "已登录"); login.setOnClickListener(v -> showAsmrLogin()); bar.addView(login);
+        Button diag = new Button(this); diag.setText("诊断日志"); diag.setOnClickListener(v -> showAsmrDiagnostics()); bar.addView(diag);
+        root.addView(bar);
+        statusView = new TextView(this);
+        statusView.setText(asmrUseXray ? "ASMR HTML · Xray 已开启" : "ASMR HTML · HTTPS 直连");
+        root.addView(statusView);
+        asmrScroll = new ScrollView(this);
+        asmrContent = new LinearLayout(this); asmrContent.setOrientation(LinearLayout.VERTICAL);
+        asmrScroll.addView(asmrContent);
+        root.addView(asmrScroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        setContentView(root);
+        loadAsmrPage(asmrPage);
+    }
+
+    private void showHomeScreenSafe() {
+        LinearLayout root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL); root.setPadding(dp(20),dp(20),dp(20),dp(20));
+        googleButton = new Button(this); googleButton.setText("Access Google"); googleButton.setOnClickListener(v -> runGoogleTest()); root.addView(googleButton);
+        statusView = new TextView(this); statusView.setText(coreStarted ? "Xray Core started" : "Starting Xray Core…"); root.addView(statusView);
+        responseView = new TextView(this); ScrollView scroll = new ScrollView(this); scroll.addView(responseView); root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
+        Button asmr = new Button(this); asmr.setText("打开 ASMR 浏览器"); asmr.setOnClickListener(v -> showAsmrBrowser()); root.addView(asmr,0);
+        Button subscriptions = new Button(this); subscriptions.setText("代理订阅 / 更新节点"); subscriptions.setOnClickListener(v -> showSubscriptionManager()); root.addView(subscriptions,1);
+        setContentView(root);
+    }
+
+    private void showSubscriptionManager() {
+        LinearLayout layout = new LinearLayout(this); layout.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(12); layout.setPadding(pad, pad, pad, pad);
+        EditText urlInput = new EditText(this); urlInput.setSingleLine(true); urlInput.setHint("粘贴订阅 URL（https://…）");
+        urlInput.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_URI);
+        urlInput.setText(prefs.getString("subscription_url", "")); layout.addView(urlInput, new LinearLayout.LayoutParams(-1, -2));
+        TextView status = new TextView(this); status.setText("已保存节点：" + loadSubscriptionNodes().length() + " 个。更新成功后可点选节点。");
+        status.setPadding(0, dp(6), 0, dp(6)); layout.addView(status);
+        Button update = new Button(this); update.setText("更新订阅列表"); layout.addView(update);
+        ScrollView scroll = new ScrollView(this); LinearLayout nodeList = new LinearLayout(this); nodeList.setOrientation(LinearLayout.VERTICAL);
+        scroll.addView(nodeList); layout.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1f));
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("代理订阅").setView(layout).setNegativeButton("关闭", null).create();
+        update.setOnClickListener(v -> {
+            String subscriptionUrl = urlInput.getText().toString().trim();
+            if (!(subscriptionUrl.startsWith("https://") || subscriptionUrl.startsWith("http://"))) { status.setText("请输入有效的 http:// 或 https:// 订阅地址"); return; }
+            update.setEnabled(false); update.setText("正在更新…"); status.setText("正在下载并解析订阅列表…");
+            io.execute(() -> {
+                try {
+                    JSONArray parsed = SubscriptionHelper.download(subscriptionUrl, TIMEOUT_MS);
+                    if (parsed.length() == 0) throw new java.io.IOException("没有解析到支持的节点（VLESS / VMess / Trojan）");
+                    int previous = prefs.getInt("subscription_selected_id", 0); boolean keepPrevious = false;
+                    for (int i = 0; i < parsed.length(); i++) {
+                        JSONObject item = parsed.optJSONObject(i);
+                        if (item != null && item.optInt("id") == previous) keepPrevious = true;
+                    }
+                    int selected = keepPrevious ? previous : parsed.optJSONObject(0).optInt("id", 1);
+                    prefs.edit().putString("subscription_url", subscriptionUrl).putString("subscription_nodes", parsed.toString()).putInt("subscription_selected_id", selected).apply();
+                    applySelectedSubscriptionNode(selected, null);
+                    runOnUiThread(() -> {
+                        if (isFinishing()) return;
+                        update.setEnabled(true); update.setText("更新订阅列表");
+                        status.setText("更新成功：" + parsed.length() + " 个节点；已应用 " + selectedNodeName(parsed, selected));
+                        renderSubscriptionNodes(nodeList, status);
+                    });
+                } catch (Throwable e) {
+                    Log.w(TAG, "Subscription update failed", e);
+                    runOnUiThread(() -> {
+                        if (!isFinishing()) {
+                            update.setEnabled(true); update.setText("重试更新");
+                            status.setText("更新失败：" + e.getClass().getSimpleName() + "：" + (e.getMessage() == null ? "未知错误" : e.getMessage()));
+                        }
+                    });
+                }
+            });
+        });
+        renderSubscriptionNodes(nodeList, status);
+        dialog.show();
+        if (dialog.getWindow() != null) dialog.getWindow().setLayout((int)(getResources().getDisplayMetrics().widthPixels * 0.92), (int)(getResources().getDisplayMetrics().heightPixels * 0.78));
+    }
+
+    private JSONArray loadSubscriptionNodes() {
+        try { return new JSONArray(prefs.getString("subscription_nodes", "[]")); }
+        catch (Exception e) { return new JSONArray(); }
+    }
+
+    private String selectedNodeName(JSONArray nodes, int id) {
+        for (int i = 0; i < nodes.length(); i++) {
+            JSONObject n = nodes.optJSONObject(i);
+            if (n != null && n.optInt("id") == id) return n.optString("name", "节点 " + id);
+        }
+        return "节点 " + id;
+    }
+
+    private void renderSubscriptionNodes(LinearLayout nodeList, TextView status) {
+        nodeList.removeAllViews();
+        JSONArray nodes = loadSubscriptionNodes(); int selected = prefs.getInt("subscription_selected_id", 0);
+        for (int i = 0; i < nodes.length(); i++) {
+            JSONObject node = nodes.optJSONObject(i); if (node == null) continue;
+            int id = node.optInt("id", i + 1); Button item = new Button(this); item.setAllCaps(false);
+            item.setText((id == selected ? "✓ " : "") + node.optString("name", "节点 " + id) + "\n" +
+                node.optString("protocol", "").toUpperCase(Locale.ROOT) + " · " + node.optString("address", "") + ":" + node.optInt("port"));
+            item.setOnClickListener(v -> {
+                prefs.edit().putInt("subscription_selected_id", id).apply();
+                status.setText("已选择：" + node.optString("name", "节点 " + id) + "，正在应用到 Xray…");
+                renderSubscriptionNodes(nodeList, status);
+                io.execute(() -> applySelectedSubscriptionNode(id, status));
+            });
+            nodeList.addView(item, new LinearLayout.LayoutParams(-1, -2));
+        }
+        if (nodes.length() == 0) {
+            TextView empty = new TextView(this); empty.setText("尚无订阅节点。粘贴订阅地址后点击“更新订阅列表”。");
+            empty.setPadding(0, dp(12), 0, dp(12)); nodeList.addView(empty);
+        }
+    }
+
+    private void applySelectedSubscriptionNode(int id, TextView status) {
+        try {
+            JSONObject root = configWithSelectedNode(id);
+            if (controller != null) try { controller.stopLoop(); } catch (Throwable ignored) {}
+            controller = Libv2ray.newCoreController(callback);
+            controller.startLoop(root.toString(), 0);
+            coreStarted = true;
+            JSONArray nodes = loadSubscriptionNodes();
+            String message = "已应用代理节点：" + selectedNodeName(nodes, id);
+            transferLog("I", message);
+            if (status != null) runOnUiThread(() -> status.setText(message));
+        } catch (Throwable e) {
+            Log.e(TAG, "Failed to apply subscription node", e);
+            if (status != null) runOnUiThread(() -> status.setText("节点应用失败：" + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage())));
+            throw new RuntimeException(e);
+        }
+    }
+
+    private JSONObject configWithSelectedNode(int id) throws Exception {
+        JSONObject root = new JSONObject(readAsset("config.json"));
+        JSONArray nodes = loadSubscriptionNodes(); JSONObject selected = null;
+        for (int i = 0; i < nodes.length(); i++) {
+            JSONObject candidate = nodes.optJSONObject(i);
+            if (candidate != null && candidate.optInt("id") == id) { selected = candidate; break; }
+        }
+        if (selected == null) throw new java.io.IOException("找不到已选择的订阅节点");
+        JSONObject outbound = SubscriptionHelper.outbound(selected); outbound.put("tag", "proxy");
+        JSONArray oldOutbounds = root.optJSONArray("outbounds"); JSONArray replacement = new JSONArray().put(outbound);
+        if (oldOutbounds != null) for (int i = 0; i < oldOutbounds.length(); i++) {
+            JSONObject old = oldOutbounds.optJSONObject(i);
+            if (old != null && "direct".equals(old.optString("tag"))) replacement.put(old);
+        }
+        if (replacement.length() == 1) replacement.put(new JSONObject().put("tag", "direct").put("protocol", "freedom"));
+        root.put("outbounds", replacement);
+        JSONObject log = root.optJSONObject("log"); if (log == null) { log = new JSONObject(); root.put("log", log); }
+        log.put("loglevel", "debug").put("access", new java.io.File(getFilesDir(), "access.log").getAbsolutePath())
+            .put("error", new java.io.File(getFilesDir(), "error.log").getAbsolutePath());
+        return root;
+    }
+
+    private JSONObject configWithSavedSubscriptionIfAny() throws Exception {
+        JSONArray nodes = loadSubscriptionNodes();
+        if (nodes.length() == 0) {
+            JSONObject root = new JSONObject(readAsset("config.json"));
+            JSONObject log = root.optJSONObject("log"); if (log == null) { log = new JSONObject(); root.put("log", log); }
+            log.put("loglevel", "debug").put("access", new java.io.File(getFilesDir(), "access.log").getAbsolutePath())
+                .put("error", new java.io.File(getFilesDir(), "error.log").getAbsolutePath());
+            return root;
+        }
+        int id = prefs.getInt("subscription_selected_id", nodes.optJSONObject(0).optInt("id", 1));
+        return configWithSelectedNode(id);
+    }
+
+    private void showAsmrSettings() {
+        new AlertDialog.Builder(this).setTitle("ASMR 访问设置")
+            .setMessage("开启时，HTML 页面和缩略图通过应用内 Xray 连接请求；关闭时使用 HTTPS 直连。当前页面由原生 Android 控件绘制，不使用 WebView。")
+            .setPositiveButton(asmrUseXray ? "关闭 Xray 访问" : "开启 Xray 访问", (d,w) -> {
+                asmrUseXray = !asmrUseXray;
+                prefs.edit().putBoolean("asmr_use_xray", asmrUseXray).apply();
+                loadAsmrPage(asmrPage);
+            }).setNegativeButton("取消",null).show();
+    }
+
+    private void showAsmrLogin() {
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(16); form.setPadding(pad, pad, pad, pad);
+        EditText username = new EditText(this); username.setSingleLine(true); username.setHint("ASMR 用户名"); username.setInputType(android.text.InputType.TYPE_CLASS_TEXT);
+        EditText password = new EditText(this); password.setSingleLine(true); password.setHint("密码"); password.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        form.addView(username); form.addView(password);
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("ASMR 账号登录")
+            .setMessage("使用站点原生 API 提交账号密码，不打开 WebView；凭证仅用于本次运行。")
+            .setView(form).setNegativeButton("取消", null).setPositiveButton("登录", null).create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            String name = username.getText().toString().trim(); String pass = password.getText().toString();
+            if (name.length() < 5 || pass.length() < 5) { Toast.makeText(this, "用户名和密码至少需要 5 个字符", Toast.LENGTH_LONG).show(); return; }
+            Button loginButton = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+            loginButton.setEnabled(false);
+            loginButton.setText("连接中…");
+            dialog.setMessage("正在连接 ASMR 服务器（" + (asmrUseXray ? "Xray 线路" : "直连") + "），通常需要几秒；若超时会显示原因。");
+            asmrLog("I", "ASMR login submitted; usernameChars=" + name.length() + " route=" + (asmrUseXray ? "Xray" : "direct"), null);
+            io.execute(() -> {
+                try {
+                    JSONObject result = postAsmrLogin(name, pass);
+                    JSONObject data = result.optJSONObject("data");
+                    String token = data == null ? "" : data.optString("token", "");
+                    boolean userPresent = data != null && data.optJSONObject("user") != null;
+                    asmrLog("I", "ASMR login JSON parsed; dataPresent=" + (data != null) + " tokenPresent=" + !token.isEmpty() + " userPresent=" + userPresent, null);
+                    if (token.isEmpty()) throw new java.io.IOException("登录响应未包含 data.token");
+                    asmrAuthorization = "Bearer " + token;
+                    asmrLog("I", "ASMR LOGIN SUCCESS; bearer token stored in memory (token value omitted)", null);
+                    runOnUiThread(() -> { if (!isFinishing()) { dialog.dismiss(); Toast.makeText(this, "ASMR 登录成功", Toast.LENGTH_SHORT).show(); showAsmrBrowser(); } });
+                } catch (Throwable e) {
+                    asmrLog("W", "ASMR LOGIN FAILED; type=" + e.getClass().getSimpleName() + " message=" + (e.getMessage() == null ? "(none)" : e.getMessage()), e);
+                    runOnUiThread(() -> { if (!isFinishing()) {
+                        Button retry = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+                        retry.setText("重试登录"); retry.setEnabled(true);
+                        String reason = e instanceof java.net.SocketTimeoutException
+                            ? "连接 ASMR 服务器超时。当前线路=" + (asmrUseXray ? "Xray" : "直连") + "；请检查 Xray 节点/网络，或切换线路后重试。"
+                            : "登录失败：" + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+                        dialog.setMessage(reason);
+                        Toast.makeText(this, reason, Toast.LENGTH_LONG).show();
+                    } });
+                }
+            });
+        }));
+        dialog.show();
+    }
+
+    // Diagnostic only: Android local DNS can differ from DNS performed by the Xray outbound.
+    private void logDnsResolutionAsync(String host, String route) {
+        Thread t = new Thread(() -> {
+            long started = android.os.SystemClock.elapsedRealtime();
+            try {
+                java.net.InetAddress[] addresses = java.net.InetAddress.getAllByName(host);
+                StringBuilder result = new StringBuilder();
+                for (java.net.InetAddress address : addresses) {
+                    if (result.length() > 0) result.append(", ");
+                    result.append(address.getHostAddress());
+                }
+                asmrLog("I", "DNS_RESOLVE host=" + host + " route=" + route + " androidResolved=[" + result + "] elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - started) + " note=local-DNS-only; Xray may resolve independently", null);
+            } catch (Throwable e) {
+                asmrLog("W", "DNS_RESOLVE_FAILED host=" + host + " route=" + route + " type=" + e.getClass().getSimpleName() + " message=" + String.valueOf(e.getMessage()) + " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - started), e);
+            }
+        }, "asmr-dns-diagnostic");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private HttpsURLConnection openHttpsConnection(String urlText, boolean useXray) throws Exception {
+        URL url = new URL(urlText);
+        if (useXray) {
+            waitForXray();
+            if (controller == null) throw new java.io.IOException("Xray controller is null");
+            return new XrayHttpsURLConnection(url, controller);
+        } else {
+            return (HttpsURLConnection) url.openConnection();
+        }
+    }
+
+    private JSONObject postAsmrLogin(String username, String password) throws Exception {
+        HttpsURLConnection c = null;
+        long started = android.os.SystemClock.elapsedRealtime();
+        try {
+            asmrLog("I", "ASMR login HTTP POST begin endpoint=/api/auth/me route=" + (asmrUseXray ? "Xray" : "direct") + " coreStarted=" + coreStarted + " controllerNull=" + (controller == null), null);
+            logDnsResolutionAsync("api.asmr-200.com", asmrUseXray ? "Xray" : "direct");
+            c = openHttpsConnection("https://api.asmr-200.com/api/auth/me", asmrUseXray);
+            c.setConnectTimeout(TIMEOUT_MS); c.setReadTimeout(30000); c.setRequestMethod("POST"); c.setDoOutput(true);
+            c.setRequestProperty("Content-Type", "application/json"); c.setRequestProperty("Accept", "application/json");
+            c.setRequestProperty("Origin", "https://asmr.one"); c.setRequestProperty("Referer", "https://asmr.one/");
+            JSONObject payload = new JSONObject(); payload.put("name", username); payload.put("password", password);
+            byte[] bytes = payload.toString().getBytes(StandardCharsets.UTF_8);
+            try (OutputStream out = c.getOutputStream()) { out.write(bytes); }
+            int code = c.getResponseCode(); InputStream in = code >= 400 ? c.getErrorStream() : c.getInputStream();
+            StringBuilder body = new StringBuilder();
+            if (in != null) try (BufferedReader br = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) { char[] buf = new char[4096]; int n; while ((n = br.read(buf)) != -1 && body.length() < 1024 * 1024) body.append(buf, 0, Math.min(n, 1024 * 1024 - body.length())); }
+            asmrLog("I", "ASMR login HTTP response status=" + code + " responseChars=" + body.length() + " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - started), null);
+            if (code < 200 || code >= 300) throw new java.io.IOException("API HTTP " + code + ": " + body.substring(0, Math.min(240, body.length())));
+            return new JSONObject(body.toString());
+        } finally { if (c != null) c.disconnect(); }
+    }
+
+    private JSONObject fetchAsmrJson(String urlText) throws Exception {
+        long started=android.os.SystemClock.elapsedRealtime(); HttpsURLConnection c=null;
+        try {
+            String requestHost = new URL(urlText).getHost();
+            asmrLog("I", "API request begin host=" + requestHost + " route=" + (asmrUseXray ? "Xray" : "direct") + " coreStarted=" + coreStarted + " controllerNull=" + (controller == null), null);
+            logDnsResolutionAsync(requestHost, asmrUseXray ? "Xray" : "direct");
+            c = openHttpsConnection(urlText, asmrUseXray);
+            c.setConnectTimeout(TIMEOUT_MS);c.setReadTimeout(30000);c.setInstanceFollowRedirects(true);
+            c.setRequestProperty("User-Agent","Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/130 Mobile Safari/537.36");
+            c.setRequestProperty("Accept","application/json, text/plain, */*");c.setRequestProperty("Origin","https://asmr.one");c.setRequestProperty("Referer","https://asmr.one/");
+            if (!asmrAuthorization.isEmpty()) c.setRequestProperty("Authorization", asmrAuthorization);
+            int code=c.getResponseCode();InputStream in=code>=400?c.getErrorStream():c.getInputStream();StringBuilder body=new StringBuilder();
+            if(in!=null)try(BufferedReader br=new BufferedReader(new InputStreamReader(in,StandardCharsets.UTF_8))){char[] buf=new char[8192];int n,total=0;while((n=br.read(buf))!=-1&&total<4*1024*1024){int keep=Math.min(n,4*1024*1024-total);body.append(buf,0,keep);total+=keep;}}
+            asmrLog("I","API response status="+code+" type="+c.getContentType()+" chars="+body.length()+" elapsedMs="+(android.os.SystemClock.elapsedRealtime()-started),null);
+            if(code<200||code>=300)throw new java.io.IOException("API HTTP "+code+" body="+body.substring(0,Math.min(300,body.length())));
+            return new JSONObject(body.toString());
+        }catch(Throwable e){asmrLog("E","works API request failed",e);if(e instanceof Exception)throw (Exception)e;throw new java.io.IOException(e);}finally{if(c!=null)c.disconnect();}
+    }
+
+    private java.util.ArrayList<AsmrWork> parseAsmrWorksJson(JSONObject json) throws Exception {
+        java.util.ArrayList<AsmrWork> out=new java.util.ArrayList<>();org.json.JSONArray works=json.optJSONArray("works");
+        if(works==null)throw new java.io.IOException("API JSON has no works array");
+        for(int i=0;i<works.length();i++){JSONObject item=works.optJSONObject(i);if(item==null)continue;String rawId=item.optString("id","");if(rawId.isEmpty())continue;
+            String id=rawId.startsWith("RJ")?rawId:"RJ"+String.format(java.util.Locale.US,"%08d",Long.parseLong(rawId));
+            String cover=item.optString("mainCoverUrl",item.optString("thumbnailCoverUrl",item.optString("samCoverUrl","")));if(cover.startsWith("/"))cover="https://api.asmr-200.com"+cover;
+            JSONObject circleObj=item.optJSONObject("circle");String circle=circleObj==null?item.optString("name",""):circleObj.optString("name","");
+            String date=item.optString("release",item.optString("create_date",""));out.add(new AsmrWork(id,item.optString("title",""),cover,date,circle,"https://asmr.one/work/"+id));}
+        return out;
+    }
+
+    private void loadAsmrPage(int page) {
+        asmrPage = Math.max(1,page);
+        final int requestedPage = asmrPage;
+        asmrContent.removeAllViews();
+        TextView loading = new TextView(this); loading.setText("正在请求作品 API…\n代理：" + (asmrUseXray ? "Xray" : "直连") + "\n可点击诊断日志查看详细信息"); loading.setPadding(0,dp(20),0,dp(20)); asmrContent.addView(loading);
+        asmrLog("I", "列表请求开始 page=" + requestedPage + " proxy=" + (asmrUseXray ? "Xray" : "direct") + " coreStarted=" + coreStarted + " controllerNull=" + (controller == null), null);
+        io.execute(() -> {
+            long started = android.os.SystemClock.elapsedRealtime();
+            try {
+                String url = "https://api.asmr-200.com/api/works?order=create_date&sort=desc&page=" + requestedPage + "&pageSize=20&subtitle=0";
+                JSONObject json = fetchAsmrJson(url);
+                java.util.ArrayList<AsmrWork> parsed = parseAsmrWorksJson(json);
+                asmrLog("I", "works API loaded page=" + requestedPage + " count=" + parsed.size() + " elapsedMs=" + (android.os.SystemClock.elapsedRealtime()-started), null);
+                runOnUiThread(() -> {
+                    if (isFinishing() || asmrContent == null) return;
+                    renderAsmrWorks(parsed, requestedPage);
+                    if (parsed.isEmpty()) appendAsmrDiagnosticHint("作品 API 返回了 0 条作品。点击“诊断日志”查看 HTTP 状态和 JSON 响应信息。");
+                });
+            } catch (Throwable e) {
+                asmrLog("E", "列表请求失败 page=" + requestedPage + " elapsedMs=" + (android.os.SystemClock.elapsedRealtime()-started), e);
+                runOnUiThread(() -> { if (isFinishing() || asmrContent == null) return; asmrContent.removeAllViews(); TextView err=new TextView(this); err.setText("HTML 加载失败：\n"+e.getClass().getSimpleName()+": "+e.getMessage()+"\n\n点击上方诊断日志查看完整堆栈。"); asmrContent.addView(err); Button retry=new Button(this); retry.setText("重试"); retry.setOnClickListener(v->loadAsmrPage(requestedPage)); asmrContent.addView(retry); });
+            }
+        });
+    }
+
+    private void appendAsmrDiagnosticHint(String message) { TextView hint = new TextView(this); hint.setText(message); hint.setPadding(dp(8),dp(8),dp(8),dp(8)); asmrContent.addView(hint,1); }
+
+    private void asmrLog(String level, String message, Throwable error) {
+        String line = android.text.format.DateFormat.format("yyyy-MM-dd HH:mm:ss.SSS", System.currentTimeMillis()) + " [" + level + "] " + message;
+        if ("E".equals(level)) Log.e(TAG, "[ASMR] " + message, error); else if ("W".equals(level)) Log.w(TAG, "[ASMR] " + message, error); else Log.i(TAG, "[ASMR] " + message);
+        synchronized (MainActivity.class) {
+            java.io.File file = new java.io.File(getFilesDir(), "asmr-diagnostics.log");
+            try (java.io.FileOutputStream fos = new java.io.FileOutputStream(file, true); java.io.OutputStreamWriter writer = new java.io.OutputStreamWriter(fos, StandardCharsets.UTF_8)) {
+                writer.write(line + "\n");
+                if (error != null) { java.io.StringWriter sw = new java.io.StringWriter(); error.printStackTrace(new java.io.PrintWriter(sw)); writer.write(sw.toString()); writer.write("\n"); }
+                writer.flush();
+                if (file.length() > 2 * 1024 * 1024) { java.io.File old = new java.io.File(getFilesDir(), "asmr-diagnostics.log.1"); if (old.exists()) old.delete(); file.renameTo(old); }
+            } catch (Throwable fileError) { Log.e(TAG, "[ASMR] Cannot write diagnostics file", fileError); }
+        }
+    }
+
+    private void showAsmrDiagnostics() {
+        String logs = readAsmrDiagnostics(); EditText view = new EditText(this); view.setText(logs.isEmpty() ? "暂无日志。请点击刷新后再打开诊断日志。" : logs); view.setTextIsSelectable(true); view.setSingleLine(false);
+        ScrollView scroll = new ScrollView(this); scroll.addView(view);
+        new AlertDialog.Builder(this).setTitle("ASMR 诊断日志").setView(scroll)
+            .setPositiveButton("复制全部", (d,w) -> { android.content.ClipboardManager cm=(android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE); cm.setPrimaryClip(android.content.ClipData.newPlainText("ASMR diagnostics", logs)); Toast.makeText(this,"诊断日志已复制",Toast.LENGTH_SHORT).show(); })
+            .setNeutralButton("清空", (d,w) -> { java.io.File f = new java.io.File(getFilesDir(), "asmr-diagnostics.log"); if (f.exists()) f.delete(); asmrLog("I", "用户清空诊断日志", null); }).setNegativeButton("关闭",null).show();
+    }
+
+    private String readAsmrDiagnostics() {
+        java.io.File file = new java.io.File(getFilesDir(), "asmr-diagnostics.log"); if (!file.exists()) return "";
+        try { byte[] bytes = java.nio.file.Files.readAllBytes(file.toPath()); int start = Math.max(0, bytes.length - 24000); return new String(bytes, start, bytes.length-start, StandardCharsets.UTF_8); }
+        catch (Throwable e) { return "读取日志失败：" + e; }
+    }
+
+    private String fetchAsmrHtml(String urlText) throws Exception {
+        boolean useXray = asmrUseXray;
+        long started = android.os.SystemClock.elapsedRealtime();
+        asmrLog("I", "HTTP GET begin url=" + urlText + " route=" + (useXray ? "Xray" : "direct") + " coreStarted=" + coreStarted, null);
+        HttpsURLConnection c = null;
+        try {
+            c = openHttpsConnection(urlText, useXray);
+            c.setConnectTimeout(TIMEOUT_MS); c.setReadTimeout(45000); c.setInstanceFollowRedirects(true);
+            c.setRequestProperty("User-Agent","Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/130 Mobile Safari/537.36");
+            c.setRequestProperty("Accept","text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+            c.setRequestProperty("Accept-Language","zh-CN,zh;q=0.9,en;q=0.8");
+            int code=c.getResponseCode();
+            String contentType=c.getContentType();
+            String finalUrl=c.getURL()==null ? "(unknown)" : c.getURL().toString();
+            asmrLog("I", "HTTP response code=" + code + " contentType=" + contentType + " contentLength=" + c.getContentLength() + " finalUrl=" + finalUrl + " elapsedMs=" + (android.os.SystemClock.elapsedRealtime()-started), null);
+            InputStream in=code>=400?c.getErrorStream():c.getInputStream();
+            StringBuilder out=new StringBuilder();
+            if(in!=null) try(BufferedReader br=new BufferedReader(new InputStreamReader(in,StandardCharsets.UTF_8))) {
+                char[] buf=new char[8192]; int n; int total=0;
+                while((n=br.read(buf))!=-1 && total<3*1024*1024){int keep=Math.min(n,3*1024*1024-total);out.append(buf,0,keep);total+=keep;if(total>=3*1024*1024)break;}
+            }
+            String html=out.toString();
+            asmrLog("I", "HTTP body read chars=" + html.length() + " status=" + code + " elapsedMs=" + (android.os.SystemClock.elapsedRealtime()-started), null);
+            if (code<200||code>=300) throw new java.io.IOException("HTTP "+code+" contentType="+contentType+" bodyPrefix="+html.substring(0,Math.min(300,html.length())));
+            return html;
+        } catch (Throwable e) {
+            asmrLog("E", "HTTP GET exception url=" + urlText + " elapsedMs=" + (android.os.SystemClock.elapsedRealtime()-started), e);
+            if (e instanceof Exception) throw (Exception)e;
+            throw new java.io.IOException(e);
+        } finally { if(c!=null)c.disconnect(); }
+    }
+
+    private static String htmlDecode(String s) {
+        if(s==null)return "";
+        return android.text.Html.fromHtml(s,android.text.Html.FROM_HTML_MODE_LEGACY).toString().replace("\n"," ").trim();
+    }
+
+    private java.util.ArrayList<AsmrWork> parseAsmrWorks(String html) {
+        java.util.ArrayList<AsmrWork> out = new java.util.ArrayList<>();
+        java.util.regex.Matcher cards=java.util.regex.Pattern.compile("<div\\s+id=\"(RJ[0-9]+)\"[^>]*>(.*?)(?=<div\\s+id=\"RJ[0-9]+\"|</main>)",java.util.regex.Pattern.CASE_INSENSITIVE|java.util.regex.Pattern.DOTALL).matcher(html);
+        while(cards.find()) {
+            String id=cards.group(1), card=cards.group(2);
+            java.util.regex.Matcher titleM=java.util.regex.Pattern.compile("<a[^>]+href=\"/work/"+id+"\"[^>]*>(.*?)</a>",java.util.regex.Pattern.CASE_INSENSITIVE|java.util.regex.Pattern.DOTALL).matcher(card);
+            String title="";
+            while(titleM.find()){String candidate=titleM.group(1).replaceAll("<[^>]+>"," ").trim();if(candidate.length()>title.length())title=candidate;}
+            java.util.regex.Matcher imgM=java.util.regex.Pattern.compile("<img[^>]+src=\"([^\"]*(?:cover|image)[^\"]*)\"",java.util.regex.Pattern.CASE_INSENSITIVE).matcher(card);
+            String cover=""; if(imgM.find())cover=imgM.group(1).replace("&amp;","&");
+            if(cover.isEmpty()){java.util.regex.Matcher css=java.util.regex.Pattern.compile("background-image:\\s*url\\(&quot;([^&]+)&quot;\\)").matcher(card);if(css.find())cover=css.group(1);}
+            java.util.regex.Matcher dateM=java.util.regex.Pattern.compile("(20[0-9]{2}-[0-9]{2}-[0-9]{2})").matcher(card);String date=dateM.find()?dateM.group(1):"";
+            java.util.regex.Matcher circleM=java.util.regex.Pattern.compile("class=\"text-grey ellipsis\"[^>]*>(.*?)</div>",java.util.regex.Pattern.DOTALL).matcher(card);String circle=circleM.find()?circleM.group(1).replaceAll("<[^>]+>"," ").trim():"";
+            asmrLog("D", "parsed card id=" + id + " titleChars=" + title.length() + " cover=" + cover + " date=" + date + " titlePrefix=" + title.substring(0,Math.min(100,title.length())), null);
+            if(!title.isEmpty())out.add(new AsmrWork(id,htmlDecode(title),cover,date,htmlDecode(circle),"https://asmr.one/work/"+id));
+        }
+        return out;
+    }
+
+    private void renderAsmrWorks(java.util.ArrayList<AsmrWork> works, int page) {
+        asmrWorks.clear(); asmrWorks.addAll(works); asmrContent.removeAllViews();
+        TextView heading=new TextView(this); heading.setText("ASMR 作品 · 第 "+page+" 页（API）"); heading.setTextSize(20); heading.setPadding(0,dp(8),0,dp(8)); asmrContent.addView(heading);
+        if(works.isEmpty()){TextView empty=new TextView(this);empty.setText("API 没有返回作品。可尝试登录后刷新，或打开诊断日志查看响应状态。");asmrContent.addView(empty);}
+        for(AsmrWork w:works){
+            LinearLayout card=new LinearLayout(this); card.setOrientation(LinearLayout.HORIZONTAL); card.setPadding(dp(8),dp(8),dp(8),dp(8)); card.setBackgroundColor(Color.rgb(247,248,252));
+            LinearLayout.LayoutParams cp=new LinearLayout.LayoutParams(-1,-2);cp.bottomMargin=dp(8);asmrContent.addView(card,cp);
+            ImageView cover=new ImageView(this);cover.setScaleType(ImageView.ScaleType.CENTER_CROP);LinearLayout.LayoutParams ip=new LinearLayout.LayoutParams(dp(108),dp(120));ip.rightMargin=dp(10);card.addView(cover,ip);
+            if(!w.cover.isEmpty()) loadAsmrThumbnail(w.cover,cover);
+            LinearLayout info=new LinearLayout(this);info.setOrientation(LinearLayout.VERTICAL);card.addView(info,new LinearLayout.LayoutParams(0,-2,1));
+            TextView title=new TextView(this);title.setText(w.title);title.setTextSize(15);title.setTextColor(Color.rgb(25,30,40));info.addView(title);
+            TextView meta=new TextView(this);meta.setText(w.id+"  "+w.date+"\n"+w.circle);meta.setTextSize(12);meta.setTextColor(Color.DKGRAY);info.addView(meta);
+            Button open=new Button(this);open.setText("查看目录");open.setOnClickListener(v->loadAsmrDetail(w));info.addView(open);
+            card.setOnClickListener(v->loadAsmrDetail(w));
+        }
+        LinearLayout pager=new LinearLayout(this);Button prev=new Button(this);prev.setText("上一页");prev.setEnabled(page>1);prev.setOnClickListener(v->loadAsmrPage(page-1));pager.addView(prev);
+        Button next=new Button(this);next.setText("下一页");next.setOnClickListener(v->loadAsmrPage(page+1));pager.addView(next);asmrContent.addView(pager);
+    }
+
+    private void loadAsmrThumbnail(String url, ImageView target) {
+        io.execute(() -> {
+            try {
+                HttpsURLConnection c = openHttpsConnection(url, asmrUseXray);
+                c.setConnectTimeout(TIMEOUT_MS);c.setReadTimeout(30000);
+                try(InputStream in=c.getInputStream()){android.graphics.Bitmap bmp=android.graphics.BitmapFactory.decodeStream(in);if(bmp!=null)runOnUiThread(()->target.setImageBitmap(bmp));}
+                finally{c.disconnect();}
+            } catch(Throwable e){Log.w(TAG,"ASMR thumbnail failed: "+url,e);}
+        });
+    }
+
+    private void loadAsmrDetail(AsmrWork work) {
+        asmrContent.removeAllViews();TextView loading=new TextView(this);loading.setText("正在请求作品 HTML 并解析目录…");asmrContent.addView(loading);
+        io.execute(() -> {
+            try {
+                asmrLog("I", "详情请求开始 id=" + work.id + " url=" + work.url, null);
+                String html=fetchAsmrHtml(work.url);
+                asmrLog("I", "详情 HTML chars=" + html.length() + " audioExtMarkers=" + (html.toLowerCase(java.util.Locale.ROOT).split("\\\\.(mp3|wav|m4a|ogg)",-1).length-1), null);
+                java.util.ArrayList<String[]> entries=parseAsmrDirectory(html);
+                asmrLog("I", "详情解析完成 id=" + work.id + " entries=" + entries.size(), null);
+                runOnUiThread(() -> {
+                    asmrContent.removeAllViews();Button back=new Button(this);back.setText("← 返回作品列表");back.setOnClickListener(v->loadAsmrPage(asmrPage));asmrContent.addView(back);
+                    TextView title=new TextView(this);title.setText(work.title);title.setTextSize(20);title.setPadding(0,dp(8),0,dp(8));asmrContent.addView(title);
+                    TextView note=new TextView(this);note.setText("从作品详情 HTML 提取到 "+entries.size()+" 个目录/媒体链接");asmrContent.addView(note);
+                    if(entries.isEmpty()){TextView msg=new TextView(this);msg.setText("详情 HTML 未包含可直接读取的音频目录。该页面可能由前端脚本再请求目录数据；此版本不会嵌入 WebView，也不会改用 API 替代 HTML。");asmrContent.addView(msg);}
+                    for(String[] e:entries){TextView item=new TextView(this);item.setText((e[2].equals("audio")?"♫ ":"📁 ")+e[0]+"\n"+e[1]);item.setPadding(dp(12),dp(12),dp(12),dp(12));asmrContent.addView(item);if(e[2].equals("audio")){Button play=new Button(this);play.setText("打开音频链接");play.setOnClickListener(v->new AlertDialog.Builder(this).setTitle("音频地址").setMessage(e[1]).setPositiveButton("复制",(d,w)->{android.content.ClipboardManager cm=(android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE);cm.setPrimaryClip(android.content.ClipData.newPlainText("audio",e[1]));}).setNegativeButton("关闭",null).show());asmrContent.addView(play);}}
+                });
+            } catch(Throwable e){runOnUiThread(()->{asmrContent.removeAllViews();TextView err=new TextView(this);err.setText("详情 HTML 加载失败："+e.getMessage());asmrContent.addView(err);});}
+        });
+    }
+
+    private java.util.ArrayList<String[]> parseAsmrDirectory(String html) {
+        java.util.ArrayList<String[]> out=new java.util.ArrayList<>();
+        java.util.regex.Matcher m=java.util.regex.Pattern.compile("(?is)(?:\\\"(?:title|name|fileName)\\\"\\s*:\\s*\\\"([^\\\"]+)\\\".{0,500}?\\\"(?:mediaStreamUrl|mediaDownloadUrl|url|src)\\\"\\s*:\\s*\\\"([^\\\"]+\\.(?:mp3|wav|m4a|ogg)(?:\\?[^\\\"]*)?)\\\")|(?:href=\\\"([^\\\"]+\\.(?:mp3|wav|m4a|ogg)(?:\\?[^\\\"]*)?)\\\"[^>]*>(.*?)</a>)",java.util.regex.Pattern.CASE_INSENSITIVE).matcher(html);
+        while(m.find()){String name=m.group(1),url=m.group(2);if(url==null){url=m.group(3);name=m.group(4);}if(url!=null){url=url.replace("&amp;","&").replace("\\\\/","/");if(!url.startsWith("http"))url="https://asmr.one"+(url.startsWith("/")?"":"/")+url;out.add(new String[]{htmlDecode(name==null?"音频文件":name),url,"audio"});}}
+        return out;
+    }
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
@@ -220,7 +715,7 @@ public class MainActivity extends Activity {
         try {
             Libv2ray.initCoreEnv(getFilesDir().getAbsolutePath(), "");
             controller = Libv2ray.newCoreController(callback);
-            JSONObject root = new JSONObject(readAsset("config.json"));
+            JSONObject root = configWithSavedSubscriptionIfAny();
             JSONObject log = root.optJSONObject("log");
             if (log == null) { log = new JSONObject(); root.put("log", log); }
             log.put("loglevel", "debug");
@@ -262,8 +757,7 @@ public class MainActivity extends Activity {
         if (!(url.getProtocol().equalsIgnoreCase("https"))) {
             throw new IllegalArgumentException("Only HTTPS model URLs are supported by the in-process transport");
         }
-        HttpsURLConnection c = (HttpsURLConnection) url.openConnection();
-        c.setSSLSocketFactory(new XraySSLSocketFactory(controller));
+        HttpsURLConnection c = openHttpsConnection(urlText, true);
         c.setRequestMethod(method == null ? "GET" : method.toUpperCase());
         c.setConnectTimeout(TIMEOUT_MS);
         c.setReadTimeout(120000);
@@ -307,9 +801,16 @@ public class MainActivity extends Activity {
         private int soTimeout;
 
         XraySocket(CoreController controller, String host, int port) throws Exception {
-            Log.d(TAG, "CoreController.dial start " + host + ":" + port);
-            this.connection = controller.dial(host + ":" + port);
-            Log.d(TAG, "CoreController.dial success " + host + ":" + port);
+            long dialStarted = android.os.SystemClock.elapsedRealtime();
+            Log.i(TAG, "XRAY_DIAL_BEGIN target=" + host + ":" + port + " dns=delegated-to-Xray-core");
+            try {
+                this.connection = controller.dial(host + ":" + port);
+                Log.i(TAG, "XRAY_DIAL_SUCCESS target=" + host + ":" + port + " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - dialStarted));
+            } catch (Throwable dialError) {
+                Log.e(TAG, "XRAY_DIAL_FAILED target=" + host + ":" + port + " elapsedMs=" + (android.os.SystemClock.elapsedRealtime() - dialStarted) + " type=" + dialError.getClass().getSimpleName() + " message=" + dialError.getMessage(), dialError);
+                if (dialError instanceof Exception) throw (Exception) dialError;
+                throw new java.io.IOException("Xray dial failed: " + host + ":" + port, dialError);
+            }
             this.host = host;
             this.port = port;
         }
@@ -379,7 +880,9 @@ public class MainActivity extends Activity {
         private byte[] body = new byte[0];
         private int responseCode = -1;
         private String responseMessage = "";
-        private final java.util.LinkedHashMap<String, String> headers = new java.util.LinkedHashMap<>();
+        private final java.util.LinkedHashMap<String, String> requestHeaders = new java.util.LinkedHashMap<>();
+        private final java.util.LinkedHashMap<String, String> responseHeaders = new java.util.LinkedHashMap<>();
+        private java.io.ByteArrayOutputStream requestBodyStream = null;
 
         XrayHttpsURLConnection(URL url, CoreController controller) {
             super(url);
@@ -387,33 +890,101 @@ public class MainActivity extends Activity {
             this.sslFactory = null;
         }
 
+        @Override public void setRequestMethod(String method) throws java.net.ProtocolException {
+            if (connected) throw new IllegalStateException("Already connected");
+            this.method = method.toUpperCase(java.util.Locale.ROOT);
+        }
+
+        @Override public void setRequestProperty(String key, String value) {
+            if (connected) throw new IllegalStateException("Already connected");
+            if (key != null) {
+                if (value == null) requestHeaders.remove(key);
+                else requestHeaders.put(key, value);
+            }
+        }
+
+        @Override public void addRequestProperty(String key, String value) {
+            if (connected) throw new IllegalStateException("Already connected");
+            if (key != null && value != null) {
+                requestHeaders.put(key, value);
+            }
+        }
+
+        @Override public String getRequestProperty(String key) {
+            if (key == null) return null;
+            for (java.util.Map.Entry<String, String> e : requestHeaders.entrySet()) {
+                if (e.getKey().equalsIgnoreCase(key)) return e.getValue();
+            }
+            return null;
+        }
+
+        @Override public java.util.Map<String, java.util.List<String>> getRequestProperties() {
+            java.util.Map<String, java.util.List<String>> map = new java.util.LinkedHashMap<>();
+            for (java.util.Map.Entry<String, String> e : requestHeaders.entrySet()) {
+                map.put(e.getKey(), java.util.Collections.singletonList(e.getValue()));
+            }
+            return java.util.Collections.unmodifiableMap(map);
+        }
+
+        @Override public OutputStream getOutputStream() throws java.io.IOException {
+            if (connected) throw new java.io.IOException("Already connected");
+            if (!doOutput) throw new java.net.ProtocolException("cannot write to a URLConnection if doOutput=false");
+            if (requestBodyStream == null) {
+                requestBodyStream = new java.io.ByteArrayOutputStream();
+            }
+            return requestBodyStream;
+        }
+
         @Override public void connect() throws java.io.IOException {
             if (connected) return;
             try {
-                Log.d(TAG, "XRAY_HTTP connect " + url.getHost() + ":443");
+                int port = url.getPort() > 0 ? url.getPort() : 443;
+                Log.d(TAG, "XRAY_HTTP connect " + url.getHost() + ":" + port);
                 if (sslFactory == null) sslFactory = new XraySSLSocketFactory(controller);
-                Log.d(TAG, "XRAY_HTTP create TLS socket");
-                socket = (SSLSocket) sslFactory.createSocket(url.getHost(), 443);
-                Log.d(TAG, "XRAY_HTTP TLS socket created");
-                socket.setSoTimeout(30000);
-                Log.d(TAG, "XRAY_HTTP startHandshake");
+                socket = (SSLSocket) sslFactory.createSocket(url.getHost(), port);
+                int timeout = getConnectTimeout() > 0 ? getConnectTimeout() : 30000;
+                int readTimeout = getReadTimeout() > 0 ? getReadTimeout() : 30000;
+                socket.setSoTimeout(readTimeout);
                 socket.startHandshake();
-                Log.d(TAG, "XRAY_HTTP handshake complete");
                 if (getHostnameVerifier() != null &&
                         !getHostnameVerifier().verify(url.getHost(), socket.getSession())) {
                     throw new javax.net.ssl.SSLPeerUnverifiedException("Hostname not verified: " + url.getHost());
                 }
                 OutputStream out = socket.getOutputStream();
                 String path = url.getFile();
-                if (path == null || path.length() == 0) path = "/";
-                String request = "GET " + path + " HTTP/1.1\r\n" +
-                        "Host: " + url.getHost() + "\r\n" +
-                        "User-Agent: XrayLocal/1.0\r\n" +
-                        "Connection: close\r\n\r\n";
-                Log.d(TAG, "XRAY_HTTP write request");
-                out.write(request.getBytes(StandardCharsets.ISO_8859_1));
+                if (path == null || path.isEmpty()) path = "/";
+
+                byte[] outBytes = (requestBodyStream != null) ? requestBodyStream.toByteArray() : new byte[0];
+                String reqMethod = (method != null && !method.isEmpty()) ? method : (outBytes.length > 0 ? "POST" : "GET");
+
+                StringBuilder headerBuilder = new StringBuilder();
+                headerBuilder.append(reqMethod).append(" ").append(path).append(" HTTP/1.1\r\n");
+                if (getRequestProperty("Host") == null) {
+                    headerBuilder.append("Host: ").append(url.getHost()).append("\r\n");
+                }
+                if (getRequestProperty("User-Agent") == null) {
+                    headerBuilder.append("User-Agent: XrayLocal/1.0\r\n");
+                }
+                if (getRequestProperty("Accept-Encoding") == null) {
+                    headerBuilder.append("Accept-Encoding: identity\r\n");
+                }
+                if (getRequestProperty("Connection") == null) {
+                    headerBuilder.append("Connection: close\r\n");
+                }
+                if (outBytes.length > 0 && getRequestProperty("Content-Length") == null) {
+                    headerBuilder.append("Content-Length: ").append(outBytes.length).append("\r\n");
+                }
+                for (java.util.Map.Entry<String, String> e : requestHeaders.entrySet()) {
+                    headerBuilder.append(e.getKey()).append(": ").append(e.getValue()).append("\r\n");
+                }
+                headerBuilder.append("\r\n");
+
+                out.write(headerBuilder.toString().getBytes(StandardCharsets.ISO_8859_1));
+                if (outBytes.length > 0) {
+                    out.write(outBytes);
+                }
                 out.flush();
-                Log.d(TAG, "XRAY_HTTP request written; read response");
+
                 InputStream in = socket.getInputStream();
                 parseResponse(in);
                 connected = true;
@@ -421,7 +992,7 @@ public class MainActivity extends Activity {
             } catch (SSLPeerUnverifiedException e) {
                 throw e;
             } catch (Exception e) {
-                throw new java.io.IOException("Xray HTTPS transport failed", e);
+                throw new java.io.IOException("Xray HTTPS transport failed: " + e.getMessage(), e);
             }
         }
 
@@ -436,11 +1007,12 @@ public class MainActivity extends Activity {
             String line;
             while ((line = reader.readLine()) != null && line.length() != 0) {
                 int colon = line.indexOf(':');
-                if (colon > 0) headers.put(line.substring(0, colon).trim(), line.substring(colon + 1).trim());
+                if (colon > 0) responseHeaders.put(line.substring(0, colon).trim(), line.substring(colon + 1).trim());
             }
             String transfer = getHeader("Transfer-Encoding");
             String length = getHeader("Content-Length");
             java.io.ByteArrayOutputStream data = new java.io.ByteArrayOutputStream();
+            final int MAX_BODY = 10 * 1024 * 1024;
             if (transfer != null && transfer.toLowerCase(java.util.Locale.US).contains("chunked")) {
                 while (true) {
                     String sizeLine = reader.readLine();
@@ -454,22 +1026,22 @@ public class MainActivity extends Activity {
                     while (off < size) { int b = reader.read(); if (b < 0) throw new java.io.EOFException(); chunk[off++] = (byte)b; }
                     data.write(chunk);
                     reader.readLine();
-                    if (data.size() >= 128 * 1024) break;
+                    if (data.size() >= MAX_BODY) break;
                 }
             } else if (length != null) {
                 long wanted = Long.parseLong(length);
-                long remaining = Math.min(wanted, 128L * 1024L);
+                long remaining = Math.min(wanted, (long) MAX_BODY);
                 byte[] buf = new byte[4096];
                 while (remaining > 0) { int n = in.read(buf, 0, (int)Math.min(buf.length, remaining)); if (n < 0) break; data.write(buf, 0, n); remaining -= n; }
             } else {
                 byte[] buf = new byte[4096];
-                int n; while (data.size() < 128 * 1024 && (n = in.read(buf, 0, Math.min(buf.length, 128 * 1024 - data.size()))) != -1) data.write(buf, 0, n);
+                int n; while (data.size() < MAX_BODY && (n = in.read(buf, 0, Math.min(buf.length, MAX_BODY - data.size()))) != -1) data.write(buf, 0, n);
             }
             body = data.toByteArray();
         }
 
         private String getHeader(String name) {
-            for (java.util.Map.Entry<String, String> e : headers.entrySet()) if (e.getKey().equalsIgnoreCase(name)) return e.getValue();
+            for (java.util.Map.Entry<String, String> e : responseHeaders.entrySet()) if (e.getKey().equalsIgnoreCase(name)) return e.getValue();
             return null;
         }
         @Override public int getResponseCode() throws java.io.IOException { connect(); return responseCode; }
@@ -478,7 +1050,15 @@ public class MainActivity extends Activity {
         @Override public InputStream getErrorStream() { try { connect(); return new java.io.ByteArrayInputStream(body); } catch (Exception e) { return null; } }
         @Override public String getHeaderField(String name) { return getHeader(name); }
         @Override public String getContentType() { return getHeader("Content-Type"); }
+        @Override public int getContentLength() { try { String v = getHeader("Content-Length"); return v == null ? -1 : Integer.parseInt(v); } catch (Exception e) { return -1; } }
         @Override public long getContentLengthLong() { try { String v = getHeader("Content-Length"); return v == null ? -1 : Long.parseLong(v); } catch (Exception e) { return -1; } }
+        @Override public java.util.Map<String, java.util.List<String>> getHeaderFields() {
+            java.util.Map<String, java.util.List<String>> map = new java.util.LinkedHashMap<>();
+            for (java.util.Map.Entry<String, String> e : responseHeaders.entrySet()) {
+                map.put(e.getKey(), java.util.Collections.singletonList(e.getValue()));
+            }
+            return java.util.Collections.unmodifiableMap(map);
+        }
         @Override public String getCipherSuite() { return socket == null ? null : socket.getSession().getCipherSuite(); }
         @Override public Certificate[] getLocalCertificates() { return socket == null ? null : socket.getSession().getLocalCertificates(); }
         @Override public Certificate[] getServerCertificates() throws SSLPeerUnverifiedException { if (socket == null) throw new IllegalStateException("not connected"); return socket.getSession().getPeerCertificates(); }
@@ -520,16 +1100,16 @@ public class MainActivity extends Activity {
     }
 
     public class RuntimeBridge {
-        @JavascriptInterface public String getConfig() {
+        public String getConfig() {
             JSONObject out = readSecureConfig();
             return out == null ? "{}" : out.toString();
         }
-        @JavascriptInterface public void setConfig(String json) {
+        public void setConfig(String json) {
             try { writeSecureConfig(normalizeConfig(new JSONObject(json == null ? "{}" : json))); }
             catch (Exception e) { transferLog("E", "setConfig failed: " + e.getMessage()); }
         }
-        @JavascriptInterface public String requestModel(String method, String url, String body, String headersJson) {
-            try { return requestModel(method, url, body, headersJson); }
+        public String requestModel(String method, String url, String body, String headersJson) {
+            try { return MainActivity.this.requestModel(method, url, body, headersJson); }
             catch (Throwable t) {
                 Log.e(TAG, "model request failed", t);
                 JSONObject out = new JSONObject();
@@ -537,7 +1117,7 @@ public class MainActivity extends Activity {
                 return out.toString();
             }
         }
-        @JavascriptInterface public void importConfig() {
+        public void importConfig() {
             runOnUiThread(() -> {
                 final EditText input = new EditText(MainActivity.this);
                 input.setSingleLine(true);
@@ -551,10 +1131,10 @@ public class MainActivity extends Activity {
                         .show();
             });
         }
-        @JavascriptInterface public String getTransferDebugLog() { return MainActivity.this.getTransferDebugLog(); }
-        @JavascriptInterface public void clearTransferDebugLog() { MainActivity.this.clearTransferDebugLog(); }
-        @JavascriptInterface public void appendTransferDebugLog(String message) { transferLog("I", message); }
-        @JavascriptInterface public void clearConfig() {
+        public String getTransferDebugLog() { return MainActivity.this.getTransferDebugLog(); }
+        public void clearTransferDebugLog() { MainActivity.this.clearTransferDebugLog(); }
+        public void appendTransferDebugLog(String message) { transferLog("I", message); }
+        public void clearConfig() {
             prefs.edit().clear().apply();
             try { KeyStore ks = KeyStore.getInstance(KEYSTORE); ks.load(null); if (ks.containsAlias(KEY_ALIAS)) ks.deleteEntry(KEY_ALIAS); } catch (Exception ignored) {}
         }
@@ -620,9 +1200,11 @@ public class MainActivity extends Activity {
     }
     private void joinTransfer(String base,String token,String publicKey){ io.execute(()->{try{JSONObject body=new JSONObject();body.put("token",token);body.put("publicKey",publicKey);HttpResult r=requestDirect("POST",base+"/api/config-transfer/join",body.toString());if(r.code/100!=2)throw new Exception(r.json.optString("error","连接失败"));String code=r.json.optString("code","");runOnUiThread(()->showPairingCode(code));pollForConfig(base,token);}catch(Exception e){transferLog("E","Join failed: "+e);showError("连接失败："+e.getMessage());}});}
     private void showPairingCode(String code){ if(pairingDialog!=null)pairingDialog.dismiss(); pairingDialog=new AlertDialog.Builder(this).setTitle("检测到电脑配置迁移").setMessage("连接验证码\n\n"+code+"\n\n请在电脑端输入这个验证码。").setNegativeButton("取消",(d,w)->{transferToken=null;transferPrivateKey=null;}).create(); pairingDialog.show(); }
-    private void pollForConfig(String base,String token){for(int i=0;i<300&&token.equals(transferToken);i++){try{Thread.sleep(1000);HttpResult r=requestDirect("GET",base+"/api/config-transfer/config?t="+Uri.encode(token),null);if(r.code==200){JSONObject config=decryptTransfer(r.json);writeSecureConfig(normalizeConfig(config));runOnUiThread(()->{if(pairingDialog!=null){pairingDialog.dismiss();pairingDialog=null;}transferToken=null;transferPrivateKey=null;Toast.makeText(this,"配置导入成功",Toast.LENGTH_SHORT).show();web.reload();});return;}if(r.code==410||r.code==404){showError("迁移会话已过期，请重新扫码");return;}}catch(Exception e){showError("配置导入失败："+e.getMessage());return;}}}
+    private void pollForConfig(String base,String token){for(int i=0;i<300&&token.equals(transferToken);i++){try{Thread.sleep(1000);HttpResult r=requestDirect("GET",base+"/api/config-transfer/config?t="+Uri.encode(token),null);if(r.code==200){JSONObject config=decryptTransfer(r.json);writeSecureConfig(normalizeConfig(config));runOnUiThread(()->{if(pairingDialog!=null){pairingDialog.dismiss();pairingDialog=null;}transferToken=null;transferPrivateKey=null;Toast.makeText(this,"配置导入成功",Toast.LENGTH_SHORT).show();});return;}if(r.code==410||r.code==404){showError("迁移会话已过期，请重新扫码");return;}}catch(Exception e){showError("配置导入失败："+e.getMessage());return;}}}
     private JSONObject decryptTransfer(JSONObject encrypted)throws Exception{byte[] encryptedKey=Base64.decode(encrypted.getString("encryptedKey"),Base64.DEFAULT);OAEPParameterSpec oaep=new OAEPParameterSpec("SHA-256","MGF1",MGF1ParameterSpec.SHA256,PSource.PSpecified.DEFAULT);Cipher rsa=Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding");rsa.init(Cipher.DECRYPT_MODE,transferPrivateKey,oaep);byte[] aesKey=rsa.doFinal(encryptedKey);Cipher aes=Cipher.getInstance("AES/GCM/NoPadding");byte[] iv=Base64.decode(encrypted.getString("iv"),Base64.DEFAULT);byte[] tag=Base64.decode(encrypted.getString("tag"),Base64.DEFAULT);byte[] ciphertext=Base64.decode(encrypted.getString("ciphertext"),Base64.DEFAULT);byte[] combined=new byte[ciphertext.length+tag.length];System.arraycopy(ciphertext,0,combined,0,ciphertext.length);System.arraycopy(tag,0,combined,ciphertext.length,tag.length);aes.init(Cipher.DECRYPT_MODE,new javax.crypto.spec.SecretKeySpec(aesKey,"AES"),new GCMParameterSpec(128,iv));return new JSONObject(new String(aes.doFinal(combined),StandardCharsets.UTF_8));}
     private void showError(String message){runOnUiThread(()->Toast.makeText(this,message,Toast.LENGTH_LONG).show());}
-    @Override protected void onDestroy(){io.shutdownNow();transferPrivateKey=null;transferToken=null;if(pairingDialog!=null)pairingDialog.dismiss();if(web!=null)web.destroy();if(controller!=null){try{controller.stopLoop();}catch(Throwable ignored){}}controller=null;coreStarted=false;super.onDestroy();}
-    @Override public void onBackPressed(){if(web!=null&&web.canGoBack())web.goBack();else super.onBackPressed();}
+    @Override protected void onDestroy(){io.shutdownNow();transferPrivateKey=null;transferToken=null;if(pairingDialog!=null)pairingDialog.dismiss();if(controller!=null){try{controller.stopLoop();}catch(Throwable ignored){}}controller=null;coreStarted=false;super.onDestroy();}
 }
+
+
+
