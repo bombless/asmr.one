@@ -109,6 +109,8 @@ public class FloatingSubtitleService extends Service {
             if (ACTION_TOGGLE_PLAY.equals(action)) {
                 if (controlListener != null) {
                     controlListener.onFloatingTogglePlay();
+                } else if (MediaPlaybackService.isRunning()) {
+                    MediaPlaybackService.getInstance().togglePlayPause();
                 }
             } else if (ACTION_CLOSE.equals(action)) {
                 if (controlListener != null) {
@@ -247,6 +249,8 @@ public class FloatingSubtitleService extends Service {
         playPauseBtn.setOnClickListener(v -> {
             if (controlListener != null) {
                 controlListener.onFloatingTogglePlay();
+            } else if (MediaPlaybackService.isRunning()) {
+                MediaPlaybackService.getInstance().togglePlayPause();
             }
         });
         header.addView(playPauseBtn);

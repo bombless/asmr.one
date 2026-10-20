@@ -111,19 +111,17 @@ public class MainActivity extends Activity {
     private volatile String asmrUsername = "";
 
     // In-app media player fields
-    private MediaPlayer mediaPlayer;
     private LocalMediaProxyServer mediaProxyServer;
-    private final Handler progressHandler = new Handler(Looper.getMainLooper());
-    private Runnable progressRunnable;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private String currentPlayingTitle = "";
     private String currentPlayingUrl = "";
-    private boolean isPreparingMedia = false;
     private LinearLayout playerBarView;
     private TextView playerTitleView;
     private TextView playerTimeView;
     private Button playerPlayPauseBtn;
     private SeekBar playerSeekBar;
     private boolean isUserTrackingSeekBar = false;
+    private AsmrWork currentDetailWork = null;
 
     // Subtitle & Floating lyrics overlay fields
     private TextView playerSubtitleView;
@@ -240,6 +238,181 @@ public class MainActivity extends Activity {
                 });
             }
         });
+
+        // Setup MediaPlaybackService ProxyResolver
+        MediaPlaybackService.setProxyResolver(new MediaPlaybackService.ProxyResolver() {
+            @Override
+            public String resolvePlaybackUrl(String targetUrl) {
+                try {
+                    if (mediaProxyServer == null) {
+                        mediaProxyServer = new LocalMediaProxyServer(MainActivity.this);
+                        mediaProxyServer.start();
+                    }
+                    return mediaProxyServer.getProxyUrl(targetUrl);
+                } catch (Throwable e) {
+                    Log.e(TAG, "Proxy setup failed", e);
+                    return targetUrl;
+                }
+            }
+
+            @Override
+            public android.graphics.Bitmap fetchCoverBitmap(String url) {
+                try {
+                    HttpsURLConnection c = openHttpsConnection(url, asmrUseXray);
+                    c.setConnectTimeout(TIMEOUT_MS);
+                    c.setReadTimeout(30000);
+                    try (InputStream in = c.getInputStream()) {
+                        return android.graphics.BitmapFactory.decodeStream(in);
+                    } finally {
+                        c.disconnect();
+                    }
+                } catch (Throwable e) {
+                    Log.w(TAG, "fetchCoverBitmap failed: " + url, e);
+                    return null;
+                }
+            }
+
+            @Override
+            public void onLoadSubtitlesForTrack(MediaTrack track) {
+                if (track != null) {
+                    loadMatchingSubtitleAsync(track.title);
+                }
+            }
+        });
+
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 101);
+            }
+        }
+    }
+
+    private final MediaPlaybackService.PlayerListener playerListener = new MediaPlaybackService.PlayerListener() {
+        @Override
+        public void onTrackChanged(MediaTrack track, int index, int totalCount) {
+            runOnUiThread(() -> {
+                currentPlayingTitle = track != null ? track.title : "";
+                if (playerBarView != null) {
+                    playerBarView.setVisibility(View.VISIBLE);
+                }
+                if (playerTitleView != null) {
+                    playerTitleView.setText("▶ " + currentPlayingTitle);
+                }
+                if (playerPlayPauseBtn != null) {
+                    playerPlayPauseBtn.setText("加载中");
+                    playerPlayPauseBtn.setEnabled(false);
+                }
+            });
+        }
+
+        @Override
+        public void onPlaybackStateChanged(boolean isPlaying, boolean isPreparing) {
+            runOnUiThread(() -> {
+                if (playerBarView != null) {
+                    playerBarView.setVisibility(View.VISIBLE);
+                }
+                if (playerPlayPauseBtn != null) {
+                    if (isPreparing) {
+                        playerPlayPauseBtn.setText("加载中");
+                        playerPlayPauseBtn.setEnabled(false);
+                    } else {
+                        playerPlayPauseBtn.setText(isPlaying ? "暂停" : "播放");
+                        playerPlayPauseBtn.setEnabled(true);
+                    }
+                }
+                if (playerTitleView != null) {
+                    if (isPreparing) {
+                        playerTitleView.setText("加载中: " + currentPlayingTitle);
+                    } else {
+                        playerTitleView.setText((isPlaying ? "▶ " : "❚❚ ") + currentPlayingTitle);
+                    }
+                }
+            });
+        }
+
+        @Override
+        public void onProgressUpdate(int currentMs, int durationMs) {
+            runOnUiThread(() -> {
+                if (durationMs > 0 && !isUserTrackingSeekBar && playerSeekBar != null) {
+                    int progress = (int) (((long) currentMs * 1000) / durationMs);
+                    playerSeekBar.setProgress(progress);
+                }
+                if (playerTimeView != null) {
+                    playerTimeView.setText(formatDuration(currentMs / 1000.0) + " / " + formatDuration(durationMs > 0 ? durationMs / 1000.0 : 0));
+                }
+            });
+        }
+
+        @Override
+        public void onLyricChanged(String lyric) {
+            runOnUiThread(() -> {
+                currentPlayingSubtitleText = lyric != null ? lyric : "";
+                if (playerSubtitleView != null) {
+                    if (!currentPlayingSubtitleText.isEmpty()) {
+                        playerSubtitleView.setVisibility(View.VISIBLE);
+                        playerSubtitleView.setText(currentPlayingSubtitleText);
+                    } else {
+                        playerSubtitleView.setVisibility(View.GONE);
+                        playerSubtitleView.setText("");
+                    }
+                }
+            });
+        }
+
+        @Override
+        public void onError(String message) {
+            runOnUiThread(() -> {
+                Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show();
+                if (playerTitleView != null) {
+                    playerTitleView.setText("播放出错: " + currentPlayingTitle);
+                }
+                if (playerPlayPauseBtn != null) {
+                    playerPlayPauseBtn.setText("重试");
+                    playerPlayPauseBtn.setEnabled(true);
+                }
+            });
+        }
+    };
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        MediaPlaybackService.addListener(playerListener);
+        if (MediaPlaybackService.isRunning()) {
+            MediaPlaybackService service = MediaPlaybackService.getInstance();
+            if (service != null && service.getCurrentTrack() != null) {
+                if (playerBarView != null) {
+                    playerBarView.setVisibility(View.VISIBLE);
+                }
+                currentPlayingTitle = service.getCurrentTrack().title;
+                boolean playing = service.isPlaying();
+                boolean preparing = service.isPreparing();
+                if (playerTitleView != null) {
+                    playerTitleView.setText((playing ? "▶ " : "❚❚ ") + currentPlayingTitle);
+                }
+                if (playerPlayPauseBtn != null) {
+                    playerPlayPauseBtn.setText(preparing ? "加载中" : (playing ? "暂停" : "播放"));
+                    playerPlayPauseBtn.setEnabled(!preparing);
+                }
+                if (playerFloatingBtn != null) {
+                    playerFloatingBtn.setText(FloatingSubtitleService.isRunning() ? "关闭悬浮" : "悬浮歌词");
+                }
+                int cur = service.getCurrentPosition();
+                int dur = service.getDuration();
+                if (playerTimeView != null) {
+                    playerTimeView.setText(formatDuration(cur / 1000.0) + " / " + formatDuration(dur > 0 ? dur / 1000.0 : 0));
+                }
+                if (playerSeekBar != null && dur > 0) {
+                    playerSeekBar.setProgress((int) (((long) cur * 1000) / dur));
+                }
+            }
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        MediaPlaybackService.removeListener(playerListener);
+        super.onPause();
     }
 
     public static final int ASMR_MODE_CATALOG = 0;
@@ -1954,6 +2127,7 @@ public class MainActivity extends Activity {
     }
 
     private void loadAsmrDetail(AsmrWork work) {
+        currentDetailWork = work;
         asmrContent.removeAllViews();
         TextView loading = new TextView(this);
         loading.setText("正在通过 ASMR API 请求作品目录…\n代理：" + (asmrUseXray ? "Xray" : "直连"));
@@ -2886,8 +3060,12 @@ public class MainActivity extends Activity {
     private JSONObject decryptTransfer(JSONObject encrypted)throws Exception{byte[] encryptedKey=Base64.decode(encrypted.getString("encryptedKey"),Base64.DEFAULT);OAEPParameterSpec oaep=new OAEPParameterSpec("SHA-256","MGF1",MGF1ParameterSpec.SHA256,PSource.PSpecified.DEFAULT);Cipher rsa=Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding");rsa.init(Cipher.DECRYPT_MODE,transferPrivateKey,oaep);byte[] aesKey=rsa.doFinal(encryptedKey);Cipher aes=Cipher.getInstance("AES/GCM/NoPadding");byte[] iv=Base64.decode(encrypted.getString("iv"),Base64.DEFAULT);byte[] tag=Base64.decode(encrypted.getString("tag"),Base64.DEFAULT);byte[] ciphertext=Base64.decode(encrypted.getString("ciphertext"),Base64.DEFAULT);byte[] combined=new byte[ciphertext.length+tag.length];System.arraycopy(ciphertext,0,combined,0,ciphertext.length);System.arraycopy(tag,0,combined,ciphertext.length,tag.length);aes.init(Cipher.DECRYPT_MODE,new javax.crypto.spec.SecretKeySpec(aesKey,"AES"),new GCMParameterSpec(128,iv));return new JSONObject(new String(aes.doFinal(combined),StandardCharsets.UTF_8));}
     private void showError(String message){runOnUiThread(()->Toast.makeText(this,message,Toast.LENGTH_LONG).show());}
     @Override protected void onDestroy(){
-        stopAudioPlayback();
-        FloatingSubtitleService.stop(this);
+        MediaPlaybackService.removeListener(playerListener);
+        // Do not force stop MediaPlaybackService on activity destroy so background playback persists,
+        // but if player was already stopped, ensure clean state.
+        if (!MediaPlaybackService.isRunning() || !MediaPlaybackService.getInstance().isPlaying()) {
+            MediaPlaybackService.stop(this);
+        }
         FloatingSubtitleService.setControlListener(null);
         if (mediaProxyServer != null) {
             mediaProxyServer.stop();
@@ -2911,7 +3089,7 @@ public class MainActivity extends Activity {
         playerBarView.setOrientation(LinearLayout.VERTICAL);
         playerBarView.setBackgroundColor(Color.rgb(238, 242, 246));
         playerBarView.setPadding(dp(12), dp(8), dp(12), dp(10));
-        playerBarView.setVisibility(currentPlayingUrl.isEmpty() ? View.GONE : View.VISIBLE);
+        playerBarView.setVisibility(MediaPlaybackService.isRunning() ? View.VISIBLE : View.GONE);
 
         // Top row: Title + Close Button
         LinearLayout topRow = new LinearLayout(this);
@@ -2965,9 +3143,9 @@ public class MainActivity extends Activity {
         playerSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                if (fromUser && mediaPlayer != null) {
+                if (fromUser && MediaPlaybackService.isRunning()) {
                     try {
-                        int duration = mediaPlayer.getDuration();
+                        int duration = MediaPlaybackService.getInstance().getDuration();
                         if (duration > 0) {
                             int newPos = (int) ((progress / 1000.0) * duration);
                             playerTimeView.setText(formatDuration(newPos / 1000.0) + " / " + formatDuration(duration / 1000.0));
@@ -2984,12 +3162,12 @@ public class MainActivity extends Activity {
             @Override
             public void onStopTrackingTouch(SeekBar seekBar) {
                 isUserTrackingSeekBar = false;
-                if (mediaPlayer != null) {
+                if (MediaPlaybackService.isRunning()) {
                     try {
-                        int duration = mediaPlayer.getDuration();
+                        int duration = MediaPlaybackService.getInstance().getDuration();
                         if (duration > 0) {
                             int targetPos = (int) ((seekBar.getProgress() / 1000.0) * duration);
-                            mediaPlayer.seekTo(targetPos);
+                            MediaPlaybackService.getInstance().seekTo(targetPos);
                         }
                     } catch (Exception ignored) {}
                 }
@@ -3006,28 +3184,36 @@ public class MainActivity extends Activity {
 
         playerBarView.addView(progressRow);
 
-        // Bottom row: Controls (Rewind 15s, Play/Pause, Forward 15s)
+        // Bottom row: Controls (Prev, Rewind 15s, Play/Pause, Forward 15s, Next)
         LinearLayout controlsRow = new LinearLayout(this);
         controlsRow.setOrientation(LinearLayout.HORIZONTAL);
         controlsRow.setGravity(Gravity.CENTER);
+
+        Button prevBtn = new Button(this);
+        prevBtn.setText("⏮");
+        prevBtn.setTextSize(12);
+        prevBtn.setPadding(dp(8), dp(2), dp(8), dp(2));
+        prevBtn.setOnClickListener(v -> {
+            if (MediaPlaybackService.isRunning()) {
+                MediaPlaybackService.getInstance().skipToPrevious();
+            }
+        });
+        controlsRow.addView(prevBtn);
 
         Button rewBtn = new Button(this);
         rewBtn.setText("-15s");
         rewBtn.setTextSize(12);
         rewBtn.setPadding(dp(12), dp(2), dp(12), dp(2));
         rewBtn.setOnClickListener(v -> {
-            if (mediaPlayer != null) {
-                try {
-                    int pos = Math.max(0, mediaPlayer.getCurrentPosition() - 15000);
-                    mediaPlayer.seekTo(pos);
-                    updatePlayerProgress();
-                } catch (Exception ignored) {}
+            if (MediaPlaybackService.isRunning()) {
+                MediaPlaybackService.getInstance().rewind(15000);
             }
         });
         controlsRow.addView(rewBtn);
 
         playerPlayPauseBtn = new Button(this);
-        playerPlayPauseBtn.setText((mediaPlayer != null && mediaPlayer.isPlaying()) ? "暂停" : "播放");
+        boolean isPlaying = MediaPlaybackService.isRunning() && MediaPlaybackService.getInstance().isPlaying();
+        playerPlayPauseBtn.setText(isPlaying ? "暂停" : "播放");
         playerPlayPauseBtn.setTextSize(12);
         playerPlayPauseBtn.setPadding(dp(16), dp(2), dp(16), dp(2));
         playerPlayPauseBtn.setOnClickListener(v -> toggleAudioPlayback());
@@ -3038,16 +3224,22 @@ public class MainActivity extends Activity {
         fwdBtn.setTextSize(12);
         fwdBtn.setPadding(dp(12), dp(2), dp(12), dp(2));
         fwdBtn.setOnClickListener(v -> {
-            if (mediaPlayer != null) {
-                try {
-                    int duration = mediaPlayer.getDuration();
-                    int pos = Math.min(duration > 0 ? duration : Integer.MAX_VALUE, mediaPlayer.getCurrentPosition() + 15000);
-                    mediaPlayer.seekTo(pos);
-                    updatePlayerProgress();
-                } catch (Exception ignored) {}
+            if (MediaPlaybackService.isRunning()) {
+                MediaPlaybackService.getInstance().fastForward(15000);
             }
         });
         controlsRow.addView(fwdBtn);
+
+        Button nextBtn = new Button(this);
+        nextBtn.setText("⏭");
+        nextBtn.setTextSize(12);
+        nextBtn.setPadding(dp(8), dp(2), dp(8), dp(2));
+        nextBtn.setOnClickListener(v -> {
+            if (MediaPlaybackService.isRunning()) {
+                MediaPlaybackService.getInstance().skipToNext();
+            }
+        });
+        controlsRow.addView(nextBtn);
 
         playerBarView.addView(controlsRow);
         return playerBarView;
@@ -3085,10 +3277,11 @@ public class MainActivity extends Activity {
             if (playerFloatingBtn != null) {
                 playerFloatingBtn.setText("关闭悬浮");
             }
+            boolean isPlaying = MediaPlaybackService.isRunning() && MediaPlaybackService.getInstance().isPlaying();
             FloatingSubtitleService.updateSubtitle(
                     currentPlayingSubtitleText,
                     currentPlayingTitle,
-                    mediaPlayer != null && mediaPlayer.isPlaying()
+                    isPlaying
             );
             Toast.makeText(this, "已开启桌面悬浮歌词", Toast.LENGTH_SHORT).show();
         }
@@ -3129,10 +3322,13 @@ public class MainActivity extends Activity {
                         playerSubtitleView.setVisibility(View.VISIBLE);
                         playerSubtitleView.setText("💬 已加载字幕: " + bestMatch.title);
                     }
+                    if (MediaPlaybackService.isRunning()) {
+                        MediaPlaybackService.getInstance().setSubtitles(parsed);
+                    }
                     FloatingSubtitleService.updateSubtitle(
                             "💬 已加载字幕: " + bestMatch.title,
                             currentPlayingTitle,
-                            mediaPlayer != null && mediaPlayer.isPlaying()
+                            MediaPlaybackService.isRunning() && MediaPlaybackService.getInstance().isPlaying()
                     );
                 });
             } catch (Throwable e) {
@@ -3217,128 +3413,77 @@ public class MainActivity extends Activity {
         // Attempt to find and load matching subtitle/lyric file (.vtt or .lrc)
         loadMatchingSubtitleAsync(title);
 
-        io.execute(() -> {
-            try {
-                if (mediaProxyServer == null) {
-                    mediaProxyServer = new LocalMediaProxyServer(this);
-                    mediaProxyServer.start();
+        // Build playlist from currentTrackNodes if available
+        java.util.List<MediaTrack> tracks = new java.util.ArrayList<>();
+        if (currentTrackNodes != null && !currentTrackNodes.isEmpty()) {
+            collectAudioTracks(currentTrackNodes, tracks);
+        }
+
+        int targetIndex = 0;
+        if (!tracks.isEmpty()) {
+            for (int i = 0; i < tracks.size(); i++) {
+                MediaTrack t = tracks.get(i);
+                if (url.equals(t.streamUrl) || url.equals(t.downloadUrl) || title.equals(t.title)) {
+                    targetIndex = i;
+                    break;
                 }
-                String playbackUrl = mediaProxyServer.getProxyUrl(url);
-
-                runOnUiThread(() -> {
-                    try {
-                        if (mediaPlayer != null) {
-                            try {
-                                if (mediaPlayer.isPlaying()) mediaPlayer.stop();
-                            } catch (Exception ignored) {}
-                            mediaPlayer.reset();
-                            mediaPlayer.release();
-                            mediaPlayer = null;
-                        }
-
-                        mediaPlayer = new MediaPlayer();
-                        mediaPlayer.setAudioAttributes(
-                                new AudioAttributes.Builder()
-                                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                                        .build()
-                        );
-                        mediaPlayer.setDataSource(this, Uri.parse(playbackUrl));
-
-                        isPreparingMedia = true;
-                        mediaPlayer.setOnPreparedListener(mp -> {
-                            isPreparingMedia = false;
-                            mp.start();
-                            if (playerPlayPauseBtn != null) {
-                                playerPlayPauseBtn.setText("暂停");
-                                playerPlayPauseBtn.setEnabled(true);
-                            }
-                            if (playerTitleView != null) {
-                                playerTitleView.setText("▶ " + currentPlayingTitle);
-                            }
-                            startProgressUpdater();
-                            Toast.makeText(this, "正在播放: " + currentPlayingTitle, Toast.LENGTH_SHORT).show();
-                        });
-
-                        mediaPlayer.setOnCompletionListener(mp -> {
-                            if (playerPlayPauseBtn != null) {
-                                playerPlayPauseBtn.setText("播放");
-                            }
-                            if (playerTitleView != null) {
-                                playerTitleView.setText("已播完: " + currentPlayingTitle);
-                            }
-                            stopProgressUpdater();
-                        });
-
-                        mediaPlayer.setOnErrorListener((mp, what, extra) -> {
-                            isPreparingMedia = false;
-                            Log.e(TAG, "MediaPlayer error what=" + what + " extra=" + extra);
-                            Toast.makeText(this, "音频播放出错 (" + what + ", " + extra + ")", Toast.LENGTH_LONG).show();
-                            if (playerPlayPauseBtn != null) {
-                                playerPlayPauseBtn.setText("重试");
-                                playerPlayPauseBtn.setEnabled(true);
-                            }
-                            if (playerTitleView != null) {
-                                playerTitleView.setText("播放出错: " + currentPlayingTitle);
-                            }
-                            stopProgressUpdater();
-                            return true;
-                        });
-
-                        mediaPlayer.prepareAsync();
-                    } catch (Throwable e) {
-                        Log.e(TAG, "Failed to start media player", e);
-                        Toast.makeText(this, "无法初始化播放器: " + e.getMessage(), Toast.LENGTH_LONG).show();
-                        if (playerPlayPauseBtn != null) {
-                            playerPlayPauseBtn.setText("重试");
-                            playerPlayPauseBtn.setEnabled(true);
-                        }
-                    }
-                });
-            } catch (Throwable e) {
-                Log.e(TAG, "Proxy setup failed", e);
-                runOnUiThread(() -> Toast.makeText(this, "本地媒体代理启动失败: " + e.getMessage(), Toast.LENGTH_LONG).show());
             }
-        });
+        } else {
+            MediaTrack singleTrack = new MediaTrack(
+                    "",
+                    title,
+                    url,
+                    url,
+                    0,
+                    currentDetailWork != null ? currentDetailWork.id : "",
+                    currentDetailWork != null ? currentDetailWork.title : "",
+                    currentDetailWork != null ? currentDetailWork.circle : "",
+                    currentDetailWork != null ? currentDetailWork.cover : ""
+            );
+            tracks.add(singleTrack);
+            targetIndex = 0;
+        }
+
+        MediaPlaybackService.startPlay(this, tracks, targetIndex);
+    }
+
+    private void collectAudioTracks(java.util.List<AsmrTrackNode> nodes, java.util.List<MediaTrack> out) {
+        if (nodes == null) return;
+        for (AsmrTrackNode node : nodes) {
+            if (node.isFolder()) {
+                collectAudioTracks(node.children, out);
+            } else if (node.isAudio()) {
+                String playUrl = !node.streamUrl.isEmpty() ? node.streamUrl : node.downloadUrl;
+                if (!playUrl.isEmpty()) {
+                    MediaTrack t = new MediaTrack(
+                            "",
+                            node.title,
+                            playUrl,
+                            node.downloadUrl,
+                            node.duration,
+                            currentDetailWork != null ? currentDetailWork.id : "",
+                            currentDetailWork != null ? currentDetailWork.title : "",
+                            currentDetailWork != null ? currentDetailWork.circle : "",
+                            currentDetailWork != null ? currentDetailWork.cover : ""
+                    );
+                    out.add(t);
+                }
+            }
+        }
     }
 
     private void toggleAudioPlayback() {
-        if (mediaPlayer == null) {
+        if (!MediaPlaybackService.isRunning()) {
             if (!currentPlayingUrl.isEmpty()) {
                 playAudioInApp(currentPlayingTitle, currentPlayingUrl);
             }
             return;
         }
-        if (isPreparingMedia) return;
-        try {
-            if (mediaPlayer.isPlaying()) {
-                mediaPlayer.pause();
-                if (playerPlayPauseBtn != null) playerPlayPauseBtn.setText("播放");
-                if (playerTitleView != null) playerTitleView.setText("❚❚ " + currentPlayingTitle);
-            } else {
-                mediaPlayer.start();
-                if (playerPlayPauseBtn != null) playerPlayPauseBtn.setText("暂停");
-                if (playerTitleView != null) playerTitleView.setText("▶ " + currentPlayingTitle);
-                startProgressUpdater();
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "toggleAudioPlayback failed", e);
-        }
+        MediaPlaybackService.getInstance().togglePlayPause();
     }
 
     private void stopAudioPlayback() {
-        stopProgressUpdater();
-        if (mediaPlayer != null) {
-            try {
-                if (mediaPlayer.isPlaying()) mediaPlayer.stop();
-            } catch (Exception ignored) {}
-            try {
-                mediaPlayer.reset();
-                mediaPlayer.release();
-            } catch (Exception ignored) {}
-            mediaPlayer = null;
-        }
-        isPreparingMedia = false;
+        MediaPlaybackService.stop(this);
         currentPlayingUrl = "";
         currentPlayingTitle = "";
         currentPlayingSubtitleText = "";
@@ -3353,65 +3498,6 @@ public class MainActivity extends Activity {
         if (playerBarView != null) {
             playerBarView.setVisibility(View.GONE);
         }
-    }
-
-    private void startProgressUpdater() {
-        stopProgressUpdater();
-        progressRunnable = new Runnable() {
-            @Override
-            public void run() {
-                updatePlayerProgress();
-                if (mediaPlayer != null && mediaPlayer.isPlaying()) {
-                    progressHandler.postDelayed(this, 500);
-                }
-            }
-        };
-        progressHandler.post(progressRunnable);
-    }
-
-    private void stopProgressUpdater() {
-        if (progressRunnable != null) {
-            progressHandler.removeCallbacks(progressRunnable);
-            progressRunnable = null;
-        }
-    }
-
-    private void updatePlayerProgress() {
-        if (mediaPlayer == null || isPreparingMedia) return;
-        try {
-            int current = mediaPlayer.getCurrentPosition();
-            int duration = mediaPlayer.getDuration();
-            if (duration > 0 && !isUserTrackingSeekBar && playerSeekBar != null) {
-                int progress = (int) (((long) current * 1000) / duration);
-                playerSeekBar.setProgress(progress);
-            }
-            if (playerTimeView != null) {
-                playerTimeView.setText(formatDuration(current / 1000.0) + " / " + formatDuration(duration > 0 ? duration / 1000.0 : 0));
-            }
-
-            // Sync subtitle for current playback position
-            if (currentSubtitles != null && !currentSubtitles.isEmpty()) {
-                String cueText = VttSubtitleParser.getCueText(currentSubtitles, current);
-                if (!cueText.equals(currentPlayingSubtitleText)) {
-                    currentPlayingSubtitleText = cueText;
-                    if (playerSubtitleView != null) {
-                        if (!cueText.isEmpty()) {
-                            playerSubtitleView.setVisibility(View.VISIBLE);
-                            playerSubtitleView.setText(cueText);
-                        } else {
-                            playerSubtitleView.setText("");
-                        }
-                    }
-                    if (FloatingSubtitleService.isRunning()) {
-                        FloatingSubtitleService.updateSubtitle(
-                                cueText,
-                                currentPlayingTitle,
-                                mediaPlayer != null && mediaPlayer.isPlaying()
-                        );
-                    }
-                }
-            }
-        } catch (Exception ignored) {}
     }
 }
 
