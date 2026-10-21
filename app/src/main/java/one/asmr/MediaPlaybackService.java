@@ -863,8 +863,7 @@ public class MediaPlaybackService extends Service {
                 | PlaybackState.ACTION_PLAY_PAUSE
                 | PlaybackState.ACTION_STOP
                 | PlaybackState.ACTION_SEEK_TO
-                | PlaybackState.ACTION_FAST_FORWARD
-                | PlaybackState.ACTION_REWIND;
+;
 
         if (hasPrevious() || (mediaPlayer != null && position > 3000)) {
             actions |= PlaybackState.ACTION_SKIP_TO_PREVIOUS;
@@ -877,13 +876,6 @@ public class MediaPlaybackService extends Service {
                 .setActions(actions)
                 .setState(state, position, speed, SystemClock.elapsedRealtime());
 
-        // Custom actions for fast forward / rewind
-        b.addCustomAction(
-                new PlaybackState.CustomAction.Builder(ACTION_REWIND, "快退15秒", android.R.drawable.ic_media_rew).build()
-        );
-        b.addCustomAction(
-                new PlaybackState.CustomAction.Builder(ACTION_FAST_FORWARD, "快进15秒", android.R.drawable.ic_media_ff).build()
-        );
 
         mediaSession.setPlaybackState(b.build());
     }

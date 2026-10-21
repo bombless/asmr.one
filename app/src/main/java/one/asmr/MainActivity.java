@@ -560,6 +560,10 @@ public class MainActivity extends Activity {
     }
 
     private void showAsmrBrowser() {
+        showAsmrBrowser(true);
+    }
+
+    private void showAsmrBrowser(boolean loadCurrentView) {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(12), dp(8), dp(12), dp(8));
@@ -702,7 +706,7 @@ public class MainActivity extends Activity {
         root.addView(asmrScroll, new LinearLayout.LayoutParams(-1, 0, 1));
         root.addView(createPlayerBarView(), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         setContentView(root);
-        loadAsmrCurrentView();
+        if (loadCurrentView) loadAsmrCurrentView();
     }
 
     private void showHomeScreenSafe() {
@@ -3190,21 +3194,10 @@ public class MainActivity extends Activity {
 
         playerBarView.addView(progressRow);
 
-        // Bottom row: Controls (Rewind 15s, Play/Pause, Forward 15s, Next)
+        // Bottom row: Controls (Play/Pause, Jump to Work, Next)
         LinearLayout controlsRow = new LinearLayout(this);
         controlsRow.setOrientation(LinearLayout.HORIZONTAL);
         controlsRow.setGravity(Gravity.CENTER);
-
-        Button rewBtn = new Button(this);
-        rewBtn.setText("-15s");
-        rewBtn.setTextSize(12);
-        rewBtn.setPadding(dp(12), dp(2), dp(12), dp(2));
-        rewBtn.setOnClickListener(v -> {
-            if (MediaPlaybackService.isRunning()) {
-                MediaPlaybackService.getInstance().rewind(15000);
-            }
-        });
-        controlsRow.addView(rewBtn);
 
         playerPlayPauseBtn = new Button(this);
         boolean isPlaying = MediaPlaybackService.isRunning() && MediaPlaybackService.getInstance().isPlaying();
@@ -3214,16 +3207,30 @@ public class MainActivity extends Activity {
         playerPlayPauseBtn.setOnClickListener(v -> toggleAudioPlayback());
         controlsRow.addView(playerPlayPauseBtn);
 
-        Button fwdBtn = new Button(this);
-        fwdBtn.setText("+15s");
-        fwdBtn.setTextSize(12);
-        fwdBtn.setPadding(dp(12), dp(2), dp(12), dp(2));
-        fwdBtn.setOnClickListener(v -> {
-            if (MediaPlaybackService.isRunning()) {
-                MediaPlaybackService.getInstance().fastForward(15000);
+        Button workBtn = new Button(this);
+        workBtn.setText("跳到作品");
+        workBtn.setTextSize(12);
+        workBtn.setPadding(dp(8), dp(2), dp(8), dp(2));
+        workBtn.setOnClickListener(v -> {
+            if (!MediaPlaybackService.isRunning()) {
+                Toast.makeText(this, "当前没有正在播放的作品", Toast.LENGTH_SHORT).show();
+                return;
             }
+            MediaTrack track = MediaPlaybackService.getInstance().getCurrentTrack();
+            if (track == null || track.workId == null || track.workId.trim().isEmpty()) {
+                Toast.makeText(this, "当前音频没有关联作品信息", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            String workTitle = track.workTitle == null || track.workTitle.trim().isEmpty()
+                    ? "作品 " + track.workId : track.workTitle;
+            AsmrWork work = new AsmrWork(track.workId, workTitle, track.coverUrl, "", "",
+                    "https://asmr.one/work/" + track.workId);
+            asmrMode = ASMR_MODE_CATALOG;
+            asmrPage = 1;
+            showAsmrBrowser(false);
+            loadAsmrDetail(work);
         });
-        controlsRow.addView(fwdBtn);
+        controlsRow.addView(workBtn);
 
         Button nextBtn = new Button(this);
         nextBtn.setText("⏭");
