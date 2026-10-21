@@ -3190,21 +3190,10 @@ public class MainActivity extends Activity {
 
         playerBarView.addView(progressRow);
 
-        // Bottom row: Controls (Prev, Rewind 15s, Play/Pause, Forward 15s, Next)
+        // Bottom row: Controls (Rewind 15s, Play/Pause, Forward 15s, Next)
         LinearLayout controlsRow = new LinearLayout(this);
         controlsRow.setOrientation(LinearLayout.HORIZONTAL);
         controlsRow.setGravity(Gravity.CENTER);
-
-        Button prevBtn = new Button(this);
-        prevBtn.setText("⏮");
-        prevBtn.setTextSize(12);
-        prevBtn.setPadding(dp(8), dp(2), dp(8), dp(2));
-        prevBtn.setOnClickListener(v -> {
-            if (MediaPlaybackService.isRunning()) {
-                MediaPlaybackService.getInstance().skipToPrevious();
-            }
-        });
-        controlsRow.addView(prevBtn);
 
         Button rewBtn = new Button(this);
         rewBtn.setText("-15s");
