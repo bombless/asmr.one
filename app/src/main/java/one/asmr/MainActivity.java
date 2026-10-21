@@ -615,6 +615,11 @@ public class MainActivity extends Activity {
         });
         bar.addView(reviewBtn);
 
+        Button historyBtn = new Button(this);
+        historyBtn.setText("历史记录");
+        historyBtn.setOnClickListener(v -> showPlaybackHistory());
+        bar.addView(historyBtn);
+
         Button refresh = new Button(this); refresh.setText("刷新"); refresh.setOnClickListener(v -> loadAsmrCurrentView()); bar.addView(refresh);
         Button settings = new Button(this); settings.setText("代理设置"); settings.setOnClickListener(v -> showAsmrSettings()); bar.addView(settings);
         Button login = new Button(this); login.setText(asmrAuthorization.isEmpty() ? "登录" : (asmrUsername.isEmpty() ? "已登录" : asmrUsername)); login.setOnClickListener(v -> showAsmrLogin()); bar.addView(login);
@@ -2128,6 +2133,7 @@ public class MainActivity extends Activity {
 
     private void loadAsmrDetail(AsmrWork work) {
         currentDetailWork = work;
+        saveWorkHistory(work);
         asmrContent.removeAllViews();
         TextView loading = new TextView(this);
         loading.setText("正在通过 ASMR API 请求作品目录…\n代理：" + (asmrUseXray ? "Xray" : "直连"));
@@ -3386,6 +3392,7 @@ public class MainActivity extends Activity {
         if (title == null) title = "音频播放";
         currentPlayingTitle = title;
         currentPlayingUrl = url;
+        saveFileHistory(title, url, currentDetailWork);
 
         if (playerBarView != null) {
             playerBarView.setVisibility(View.VISIBLE);
@@ -3445,6 +3452,100 @@ public class MainActivity extends Activity {
         }
 
         MediaPlaybackService.startPlay(this, tracks, targetIndex);
+    }
+
+    private static final String HISTORY_PREF_KEY = "asmr_playback_history_v1";
+    private static final int HISTORY_LIMIT = 100;
+
+    private JSONArray readPlaybackHistory() {
+        try { return new JSONArray(prefs.getString(HISTORY_PREF_KEY, "[]")); }
+        catch (Exception e) { return new JSONArray(); }
+    }
+
+    private void writeHistoryEntry(JSONObject entry) {
+        if (prefs == null || entry == null) return;
+        JSONArray old = readPlaybackHistory();
+        JSONArray updated = new JSONArray();
+        String type = entry.optString("type", "file");
+        String key = type.equals("work") ? entry.optString("workId") : entry.optString("url");
+        updated.put(entry);
+        for (int i = 0; i < old.length() && updated.length() < HISTORY_LIMIT; i++) {
+            JSONObject item = old.optJSONObject(i);
+            if (item == null) continue;
+            String itemType = item.optString("type", "file");
+            String itemKey = type.equals(itemType) ? (type.equals("work") ? item.optString("workId") : item.optString("url")) : "";
+            if (!key.equals(itemKey)) updated.put(item);
+        }
+        prefs.edit().putString(HISTORY_PREF_KEY, updated.toString()).apply();
+    }
+
+    private void saveFileHistory(String title, String url, AsmrWork work) {
+        if (url == null || url.trim().isEmpty()) return;
+        try {
+            JSONObject item = new JSONObject();
+            item.put("type", "file"); item.put("title", title == null ? "音频播放" : title); item.put("url", url);
+            item.put("workId", work == null ? "" : work.id); item.put("workTitle", work == null ? "" : work.title);
+            item.put("workCover", work == null ? "" : work.cover); item.put("workDate", work == null ? "" : work.date);
+            item.put("workCircle", work == null ? "" : work.circle); item.put("time", System.currentTimeMillis());
+            writeHistoryEntry(item);
+        } catch (Exception ignored) { }
+    }
+
+    private void saveWorkHistory(AsmrWork work) {
+        if (work == null || work.id == null || work.id.isEmpty()) return;
+        try {
+            JSONObject item = new JSONObject();
+            item.put("type", "work"); item.put("title", work.title); item.put("workId", work.id);
+            item.put("url", work.url); item.put("workCover", work.cover); item.put("workDate", work.date);
+            item.put("workCircle", work.circle); item.put("time", System.currentTimeMillis());
+            writeHistoryEntry(item);
+        } catch (Exception ignored) { }
+    }
+
+    private void showPlaybackHistory() {
+        if (asmrContent == null) return;
+        asmrContent.removeAllViews();
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL); header.setGravity(Gravity.CENTER_VERTICAL);
+        Button back = new Button(this); back.setText("← 返回"); back.setOnClickListener(v -> loadAsmrCurrentView()); header.addView(back);
+        TextView heading = new TextView(this); heading.setText("历史文件与历史作品"); heading.setTextSize(18); heading.setPadding(dp(8), 0, 0, 0); header.addView(heading);
+        asmrContent.addView(header);
+        JSONArray history = readPlaybackHistory();
+        if (history.length() == 0) {
+            TextView empty = new TextView(this); empty.setText("暂无历史记录。播放音频或打开作品后，会自动保存在这里。");
+            empty.setPadding(dp(8), dp(20), dp(8), dp(20)); asmrContent.addView(empty); return;
+        }
+        for (int i = 0; i < history.length(); i++) {
+            JSONObject item = history.optJSONObject(i); if (item == null) continue;
+            boolean isWork = "work".equals(item.optString("type"));
+            LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.VERTICAL);
+            row.setPadding(dp(10), dp(8), dp(10), dp(8)); row.setBackgroundColor(Color.rgb(247, 248, 252));
+            LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(-1, -2); rp.bottomMargin = dp(6); asmrContent.addView(row, rp);
+            TextView name = new TextView(this); name.setText((isWork ? "📚 作品：" : "🎵 文件：") + item.optString("title", "未命名"));
+            name.setTextSize(15); name.setTextColor(Color.rgb(25, 35, 55)); row.addView(name);
+            String workTitle = item.optString("workTitle", "");
+            long timestamp = item.optLong("time", 0);
+            String when = timestamp > 0 ? new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault()).format(new java.util.Date(timestamp)) : "";
+            TextView meta = new TextView(this); meta.setText((workTitle.isEmpty() ? item.optString("workId", "") : "所属作品：" + workTitle) + (when.isEmpty() ? "" : "\n最近访问：" + when));
+            meta.setTextSize(12); meta.setTextColor(Color.DKGRAY); row.addView(meta);
+            Button open = new Button(this); open.setText(isWork ? "重新打开作品" : "重新收听");
+            open.setOnClickListener(v -> {
+                if (isWork) {
+                    String id = item.optString("workId", ""); if (id.isEmpty()) return;
+                    AsmrWork work = new AsmrWork(id, item.optString("title", "作品 " + id), item.optString("workCover", ""),
+                            item.optString("workDate", ""), item.optString("workCircle", ""), item.optString("url", "https://asmr.one/work/" + id));
+                    loadAsmrDetail(work);
+                } else {
+                    String url = item.optString("url", "");
+                    if (url.isEmpty()) { Toast.makeText(this, "该历史文件没有可用的播放地址", Toast.LENGTH_SHORT).show(); return; }
+                    String id = item.optString("workId", "");
+                    if (!id.isEmpty()) currentDetailWork = new AsmrWork(id, item.optString("workTitle", ""), item.optString("workCover", ""),
+                            item.optString("workDate", ""), item.optString("workCircle", ""), "https://asmr.one/work/" + id);
+                    playAudioInApp(item.optString("title", "音频播放"), url);
+                }
+            });
+            row.addView(open);
+        }
     }
 
     private void collectAudioTracks(java.util.List<AsmrTrackNode> nodes, java.util.List<MediaTrack> out) {
