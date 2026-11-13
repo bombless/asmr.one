@@ -2353,6 +2353,8 @@ public class MainActivity extends Activity {
                     if (!playUrl.isEmpty()) {
                         if (node.isAudio()) {
                             playAudioInApp(node.title, playUrl);
+                        } else if (isTextFile(node)) {
+                            openTextFileInApp(node.title, playUrl);
                         } else {
                             showTrackActionDialog(node, playUrl);
                         }
@@ -2366,8 +2368,11 @@ public class MainActivity extends Activity {
 
     private void showTrackActionDialog(AsmrTrackNode node, String url) {
         String[] actions;
+        boolean textFile = isTextFile(node);
         if (node.isAudio()) {
             actions = new String[]{"应用内播放", "外部应用播放 (调用播放器)", "复制播放流直链", "复制下载直链 (如有)", "查看完整地址"};
+        } else if (textFile) {
+            actions = new String[]{"应用内查看文本", "外部应用打开", "复制文件直链", "查看完整地址"};
         } else {
             actions = new String[]{"外部应用打开", "复制文件直链", "查看完整地址"};
         }
@@ -2413,7 +2418,15 @@ public class MainActivity extends Activity {
                                     .show();
                         }
                     } else {
-                        if (which == 0) {
+                        int offset = 0;
+                        if (textFile) {
+                            if (which == 0) {
+                                openTextFileInApp(node.title, url);
+                                return;
+                            }
+                            offset = 1;
+                        }
+                        if (which == offset) {
                             try {
                                 android.content.Intent intent = new android.content.Intent(android.content.Intent.ACTION_VIEW);
                                 intent.setData(Uri.parse(url));
@@ -2422,12 +2435,12 @@ public class MainActivity extends Activity {
                             } catch (Throwable e) {
                                 Toast.makeText(this, "打开失败：" + e.getMessage(), Toast.LENGTH_SHORT).show();
                             }
-                        } else if (which == 1) {
+                        } else if (which == offset + 1) {
                             if (cm != null) {
                                 cm.setPrimaryClip(android.content.ClipData.newPlainText("url", url));
                                 Toast.makeText(this, "文件直链已复制到剪贴板", Toast.LENGTH_SHORT).show();
                             }
-                        } else if (which == 2) {
+                        } else if (which == offset + 2) {
                             new AlertDialog.Builder(this)
                                     .setTitle("文件地址")
                                     .setMessage(url)
@@ -2444,6 +2457,68 @@ public class MainActivity extends Activity {
                 })
                 .setNegativeButton("取消", null)
                 .show();
+    }
+
+    private static boolean isTextFile(AsmrTrackNode node) {
+        if (node == null || node.isFolder() || node.isAudio()) return false;
+        String name = node.title.toLowerCase(Locale.ROOT);
+        return name.endsWith(".vtt") || name.endsWith(".txt");
+    }
+
+    private void openTextFileInApp(String title, String url) {
+        TextView contentView = new TextView(this);
+        contentView.setText("正在加载…");
+        contentView.setTextSize(13);
+        contentView.setTextIsSelectable(true);
+        contentView.setTypeface(Typeface.MONOSPACE);
+        contentView.setPadding(dp(12), dp(8), dp(12), dp(8));
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(contentView, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setView(scroll)
+                .setPositiveButton("关闭", null)
+                .setNeutralButton("复制全文", null)
+                .create();
+        dialog.show();
+
+        final String[] loadedText = {null};
+        Button copyBtn = dialog.getButton(AlertDialog.BUTTON_NEUTRAL);
+        if (copyBtn != null) {
+            copyBtn.setEnabled(false);
+            copyBtn.setOnClickListener(v -> {
+                if (loadedText[0] == null) return;
+                android.content.ClipboardManager cm =
+                        (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                if (cm != null) {
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText(title, loadedText[0]));
+                    Toast.makeText(this, "全文已复制到剪贴板", Toast.LENGTH_SHORT).show();
+                }
+            });
+        }
+
+        io.execute(() -> {
+            try {
+                String text = executeAsmrApi("GET", url, null);
+                loadedText[0] = text;
+                String display = text;
+                if (display.isEmpty()) {
+                    display = "(空文件)";
+                } else if (display.length() > 200000) {
+                    display = display.substring(0, 200000) + "\n\n…（内容过长，已截断，可通过“复制全文”获取全部内容）";
+                }
+                final String shown = display;
+                runOnUiThread(() -> {
+                    contentView.setText(shown);
+                    if (copyBtn != null) copyBtn.setEnabled(true);
+                });
+            } catch (Throwable e) {
+                runOnUiThread(() -> contentView.setText("加载失败：" + e.getMessage()));
+            }
+        });
     }
 
     private int dp(int value) {
