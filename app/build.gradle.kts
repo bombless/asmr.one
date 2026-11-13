@@ -2,6 +2,8 @@ plugins {
     id("com.android.application")
 }
 
+val releaseKeystorePath: String? = System.getenv("RELEASE_KEYSTORE_PATH")
+
 android {
     namespace = "one.asmr"
     compileSdk = 35
@@ -14,10 +16,25 @@ android {
         versionName = "1.0"
     }
 
+    signingConfigs {
+        if (releaseKeystorePath != null) {
+            create("releaseEnv") {
+                storeFile = file(releaseKeystorePath)
+                storePassword = System.getenv("RELEASE_STORE_PASSWORD")
+                keyAlias = System.getenv("RELEASE_KEY_ALIAS")
+                keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (releaseKeystorePath != null) {
+                signingConfigs.getByName("releaseEnv")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

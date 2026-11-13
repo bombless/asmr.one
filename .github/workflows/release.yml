@@ -32,12 +32,20 @@ jobs:
           mkdir -p "$HOME/.android"
           printf '%s' "$DEBUG_KEYSTORE_BASE64" | base64 -d > "$HOME/.android/debug.keystore"
 
+      - name: Verify debug keystore
+        run: keytool -list -v -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey | grep -E "SHA256:"
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.1.0'
 
       - name: Build release APK
-        run: gradle :app:assembleRelease --no-daemon
+        run: |
+          export RELEASE_KEYSTORE_PATH="$HOME/.android/debug.keystore"
+          export RELEASE_STORE_PASSWORD=android
+          export RELEASE_KEY_ALIAS=androiddebugkey
+          export RELEASE_KEY_PASSWORD=android
+          gradle :app:assembleRelease --no-daemon
 
       - name: Prepare APK
         run: |
